@@ -55,6 +55,7 @@ Terragrunt is a thin wrapper for [Terraform](https://www.terraform.io/) that pro
    1. [Keep your CLI flags DRY](#keep-your-cli-flags-dry)
    1. [Execute Terraform commands on multiple modules at once](#execute-terraform-commands-on-multiple-modules-at-once)
    1. [Work with multiple AWS accounts](#work-with-multiple-aws-accounts)
+   1. [Share state between modules](#share-state-between-modules)
 1. [Terragrunt details](#terragrunt-details)
    1. [AWS credentials](#aws-credentials)
    1. [AWS IAM policies](#aws-iam-policies)
@@ -90,6 +91,7 @@ Terragrunt supports the following use cases:
 1. [Keep your CLI flags DRY](#keep-your-cli-flags-dry)
 1. [Execute Terraform commands on multiple modules at once](#execute-terraform-commands-on-multiple-modules-at-once)
 1. [Work with multiple AWS accounts](#work-with-multiple-aws-accounts)
+1. [Share state between modules](#share-state-between-modules)
 
 
 ### Keep your Terraform code DRY
@@ -966,8 +968,10 @@ Let's assume you have the following dependencies between Terraform modules:
 * `redis` depends on `vpc`
 * `vpc` has no dependencies
 
-You can express these dependencies in your `terraform.tfvars` config files using a `dependencies` block. For example,
-in `backend-app/terraform.tfvars` you would specify:
+If you're using the `get_output()` helper as described in [Share state between modules](#share-state-between-modules),
+these dependencies will be resolved automatically! If you're not using the `get_output()` helper, or you need to 
+express dependencies explicitly some other way, you can do it using a `dependencies` block in `terraform.tfvars`. For 
+example, in `backend-app/terraform.tfvars` you would specify:
 
 ```hcl
 terragrunt = {
@@ -1038,6 +1042,124 @@ will compute for the module above will be `/source/infrastructure-modules//netwo
 
 
 
+### Share state between modules
+
+#### Motivation
+
+Let's say your infrastructure is defined across multiple Terraform modules:
+
+```
+root
+├── app
+│   └── main.tf
+├── mysql
+│   └── main.tf
+└── vpc
+    └── main.tf
+```
+
+There is one module to deploy a frontend-app, another to deploy a backend-app, another for the MySQL database, and so
+on. Each of these modules may depend on the data from other modules. For example, the `mysql` module may need the
+VPC and subnet IDs from the `vpc` module and the `app` module may need the DB URL from the `mysql` module.
+
+If everything was in one module, you could share this data using Terraform interpolation, but how do you do it when 
+everything is broken down across multiple modules? One option is to use the [terraform_remote_state data 
+source](https://www.terraform.io/docs/providers/terraform/d/remote_state.html), which allows one module to read the
+outputs from the state file of another module. For example, the `mysql` module could get the VPC and subnet IDs
+as follows:
+
+```hcl
+# Read the VPC's data from its state, which is stored in an S3 bucket
+data "terraform_remote_state" "vpc" {
+  backend = "s3"
+
+  config {
+    bucket = "my-bucket"
+    region = "us-east-1"
+    key    = "vpc/terraform.tfstate"
+  }
+}
+
+# Use the VPC state to deploy a database
+resource "aws_db_instance" "mysql" {
+  name       = "mydb"
+  engine     = "mysql"
+  vpc_id     = "${data.terraform_remote_state.vpc.vpc_id}"
+  subnet_ids = ["${data.terraform_remote_state.vpc.private_subnet_ids}"]
+}
+```
+
+The advantage of this approach is that you are programmatically able to fetch data from other modules. The disadvantage
+of this approach is now your modules are more coupled: that is, the `mysql` module has to know that the VPC information
+is in an S3 bucket in a certain format. Moreover, this coupling is not visible to any of your tooling, so if you were
+to run, for example, `terragrunt apply-all`, it would not know that it needs to `apply` the `apply` module before the 
+`mysql` module.
+
+
+#### The get_output helper
+
+An alternative way to share state between modules is to use the `get_output()` helper, which can run the 
+`terragrunt output` command on other modules to fetch data from them. Let's continue the example above to see how this
+would work.
+
+First, you'd update the `mysql` module to take the VPC and subnet IDs as normal input variables:
+
+```hcl
+variable "vpc_id" {
+  description = "The ID of the VPC to deploy into"
+}
+
+variable "subnet_ids" {
+  description = "The IDs of of the subnets to deploy into"
+  type        = "list"
+}
+
+resource "aws_db_instance" "mysql" {
+  name       = "mydb"
+  engine     = "mysql"
+  vpc_id     = "${var.vpc_id}"
+  subnet_ids = ["${var.subnet_ids}"]
+}
+```
+
+The `mysql` module is now completely decoupled from how you create the VPC. You could use a variety of mechanisms to 
+set those input variables. To set them with the `get_output` helper, create a `terraform.tfvars` file with the following
+contents:
+
+```hcl
+vpc_id     = "${get_output("../vpc", "vpc_id")}"
+subnet_ids = "${get_output("../vpc", "private_subnet_ids")}"
+```
+
+When you run `terragrunt apply`, Terragrunt will go into the `../vpc` folder and run `terraform output` (or 
+`terragrunt output` if it's also a Terragrunt module) to fetch the values of the `vpc_id` and `private_subnet_ids`
+outputs. This way, you're still programmatically sharing state between modules, the modules don't have to be aware of
+each other at all, and Terragrunt can automatically find dependencies between modules so that `apply-all` works in
+the proper order!
+
+
+#### get_output syntax
+
+The syntax of the `get_output()` helper is:
+
+```
+get_output(DIR, OUTPUT)
+```
+
+Where:
+
+* `DIR` is the directory in which to run `terraform output` or `terragrunt output`.
+* `OUTPUT` is the name of the output variable to retrieve.
+
+When you use `get_output()`, Terragrunt will automatically: 
+
+1. Determine whether `terraform output` or `terragrunt output` should be executed. 
+1. Figure out the proper type for the output variable (e.g., `list` or `map`).
+1. Apply modules in the proper order when you run `apply-all`.
+
+
+
+
 ### Work with multiple AWS accounts
 
 #### Motivation
@@ -1098,7 +1220,7 @@ variables when running Terraform. The advantage of this approach is that you can
 store and never write them to disk in plaintext, you get fresh credentials on every run of Terragrunt, without the 
 complexity of calling `assume-role` yourself, and you don't have to modify your Terraform code or backend configuration
 at all.
- 
+  
 
 
 
