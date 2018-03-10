@@ -1,0 +1,60 @@
+{
+package config
+}
+
+start = val:value EOF { return wrapTfVarsValue(val) }
+
+value = str / number / boolean
+
+str = '"' val:interpolation_or_char* '"' { return val, nil }
+
+interpolation_or_char = interpolation / char
+
+
+////////// Interpolation
+
+interpolation = valid_interpolation / invalid_interpolation
+
+valid_interpolation = "${" ws f:function_call ws "}" { return f, nil }
+
+invalid_interpolation = "${" [^}]* "}" { return nil, InvalidInterpolation{ExpectedSyntax: "function_name()", ActualSyntax: string(c.text)} }
+
+function_call = name:function_name ws "(" ws args:function_arg* ws ")" { return NewInterpolation(name, args) }
+
+function_name = [a-zA-Z_] [a-zA-Z0-9_-]* { return string(c.text), nil }
+
+function_arg = val:value ws ","? ws { return val, nil }
+
+
+////////// Strings
+
+char = unescaped / escaped
+
+unescaped = ![\x00-\x1f"\\] . { return string(c.text), nil }
+
+escaped = '\\' ["\\/bfnrt] { return string(c.text), nil }
+
+ws "whitespace" = [ \t\n\r]*
+
+
+////////// Numbers
+
+number = float / integer
+
+integer = '-'? zero_or_int { return strconv.Atoi(string(c.text)) }
+
+zero_or_int = '0' / [1-9] [0-9]*
+
+float = '-'? integer? '.' [0-9]+ { return strconv.ParseFloat(string(c.text), 64) }
+
+
+////////// Booleans
+
+boolean = True / False
+True = "true" { return true, nil }
+False = "false" { return false, nil }
+
+
+////////// Other
+
+EOF = !.
