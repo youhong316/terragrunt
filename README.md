@@ -1828,18 +1828,28 @@ After we released support for Terraform 0.9.x, we wrote a guide on
 
 ### Developing terragrunt
 
+#### Dependencies
+
+Terragrunt uses `glide`, a vendor package management tool for golang. See the glide repo for
+[installation instructions](https://github.com/Masterminds/glide#install). To install Terragrunt's dependencies:
+
+```bash
+glide install
+```
+
+Terragrunt uses [pigeon](https://github.com/mna/pigeon) to compile a PEG grammar. If you are going to change the
+PEG grammar in `tfvars_value.peg`, you must: 
+  
+1. Install pigeon: `go get -u github.com/mna/pigeon`.
+1. Run `go generate ./...` every time you change the grammar file.
+
 #### Running locally
 
-To run Terragrunt locally, use the `go run` command:
+To run Terragrunt locally, use the `go run` command to run Terragrunt itself:
 
 ```bash
 go run main.go plan
 ```
-
-#### Dependencies
-
-* Terragrunt uses `glide`, a vendor package management tool for golang. See the glide repo for
-  [installation instructions](https://github.com/Masterminds/glide#install).
 
 #### Running tests
 
@@ -1847,7 +1857,8 @@ go run main.go plan
 real data from DynamoDB. DO NOT hit `CTRL+C` while the tests are running, as this will prevent them from cleaning up
 temporary tables and data in DynamoDB. We are not responsible for any charges you may incur.
 
-Before running the tests, you must configure your [AWS credentials](#aws-credentials) and [AWS IAM policies](#aws-iam-policies).
+Before running the tests, you must configure your [AWS credentials](#aws-credentials) 
+and [AWS IAM policies](#aws-iam-policies). 
 
 To run all the tests:
 
