@@ -8,6 +8,7 @@ dependencies:
     - curl -Ls https://raw.githubusercontent.com/gruntwork-io/gruntwork-installer/master/bootstrap-gruntwork-installer.sh | bash /dev/stdin --version v0.0.16
     - gruntwork-install --module-name "gruntwork-module-circleci-helpers" --repo "https://github.com/gruntwork-io/module-ci" --tag "v0.3.10"
     - configure-environment-for-gruntwork-module --packer-version NONE --terragrunt-version NONE --go-src-path .
+    - go get -u github.com/mna/pigeon
 
   cache_directories:
     - ~/glide
