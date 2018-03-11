@@ -23,14 +23,16 @@ func ParseTfVarsValue(filename string, value string) (*TfVarsValue, error) {
 func wrapTfVarsValue(val interface{}) (TfVarsValue, error) {
 	switch v := val.(type) {
 	case string:
-		return NewTfVarsValue(String{Contents: v}), nil
+		return NewTfVarsValue(TfVarsString(v)), nil
 	case int:
-		return NewTfVarsValue(Integer{Value: v}), nil
+		return NewTfVarsValue(TfVarsInt(v)), nil
 	case float64:
-		return NewTfVarsValue(Float{Value: v}), nil
+		return NewTfVarsValue(TfVarsFloat(v)), nil
 	case bool:
-		return NewTfVarsValue(Boolean{Value: v}), nil
-	case Interpolation:
+		return NewTfVarsValue(TfVarsBool(v)), nil
+	case TfVarsArray:
+		return NewTfVarsValue(v), nil
+	case TfVarsInterpolation:
 		return NewTfVarsValue(v), nil
 	case []interface{}:
 		parts := []TfVarsValuePart{}
@@ -39,11 +41,11 @@ func wrapTfVarsValue(val interface{}) (TfVarsValue, error) {
 			if err != nil {
 				return TfVarsValue{}, err
 			}
-			parts = append(parts, collapsed.Parts...)
+			parts = append(parts, []TfVarsValuePart(collapsed)...)
 		}
-		return NewTfVarsValue(combineStrings(parts)...), nil
+		return TfVarsValue(combineStrings(parts)), nil
 	default:
-		return TfVarsValue{}, errors.WithStackTrace(UnexpectedParserReturnType{ExpectedType: "string, int, float64, or Interpolation", ActualType: reflect.TypeOf(val), Value: val})
+		return TfVarsValue{}, errors.WithStackTrace(UnexpectedParserReturnType{ExpectedType: "string, int, float64, or TfVarsInterpolation", ActualType: reflect.TypeOf(val), Value: val})
 	}
 }
 
@@ -51,11 +53,11 @@ func combineStrings(parts []TfVarsValuePart) []TfVarsValuePart {
 	combinedParts := []TfVarsValuePart{}
 
 	for _, part := range parts {
-		if partAsString, ok := part.(String); ok && len(combinedParts) > 0 {
+		if partAsString, ok := part.(TfVarsString); ok && len(combinedParts) > 0 {
 			prevPart := combinedParts[len(combinedParts) - 1]
-			if prevPartAsString, ok := prevPart.(String); ok {
+			if prevPartAsString, ok := prevPart.(TfVarsString); ok {
 				combinedParts = combinedParts[:len(combinedParts) - 1]
-				mergedPart := String{Contents: prevPartAsString.Contents + partAsString.Contents}
+				mergedPart := TfVarsString(string(prevPartAsString) + string(partAsString))
 				combinedParts = append(combinedParts, mergedPart)
 				continue
 			}
@@ -86,97 +88,112 @@ func (err UnexpectedListLength) Error() string {
 	return fmt.Sprintf("Expected parser to return a list of length %d but got %d", err.ExpectedLength, err.ActualLength)
 }
 
-type TfVarsValue struct {
-	Parts []TfVarsValuePart
-}
+type TfVarsValue []TfVarsValuePart
 
 func NewTfVarsValue(parts ... TfVarsValuePart) TfVarsValue {
-	if parts == nil {
-		parts = []TfVarsValuePart{}
-	}
-	return TfVarsValue{Parts: parts}
+	return TfVarsValue(parts)
 }
 
 type TfVarsValuePart interface {
 	Render() string
 }
 
-type String struct {
-	Contents string
+type TfVarsString string
+
+func (val TfVarsString) Render() string {
+	return fmt.Sprintf("TfVarsString(%s)", string(val))
 }
 
-func (val String) Render() string {
-	return fmt.Sprintf("String{Contents: '%s'}", val.Contents)
-}
-
-func (val String) String() string {
+func (val TfVarsString) String() string {
 	return val.Render()
 }
 
-type Integer struct {
-	Value int
+type TfVarsInt int
+
+func (val TfVarsInt) Render() string {
+	return fmt.Sprintf("TfVarsInt(%d)", int(val))
 }
 
-func (val Integer) Render() string {
-	return fmt.Sprintf("Integer{Value: %d}", val.Value)
-}
-
-func (val Integer) String() string {
+func (val TfVarsInt) String() string {
 	return val.Render()
 }
 
-type Float struct {
-	Value float64
+type TfVarsFloat float64
+
+func (val TfVarsFloat) Render() string {
+	return fmt.Sprintf("TfVarsFloat(%f)", float64(val))
 }
 
-func (val Float) Render() string {
-	return fmt.Sprintf("Float{Value: %f}", val.Value)
-}
-
-func (val Float) String() string {
+func (val TfVarsFloat) String() string {
 	return val.Render()
 }
 
-type Boolean struct {
-	Value bool
+type TfVarsBool bool
+
+func (val TfVarsBool) Render() string {
+	return fmt.Sprintf("TfVarsBool(%s)", bool(val))
 }
 
-func (val Boolean) Render() string {
-	return fmt.Sprintf("Boolean{Value: %s}", val.Value)
-}
-
-func (val Boolean) String() string {
+func (val TfVarsBool) String() string {
 	return val.Render()
 }
 
-type Interpolation struct {
+type TfVarsArray []TfVarsValue
+
+func NewArray(items interface{}) (TfVarsArray, error) {
+	itemsSlice, err := toIfaceSlice(items)
+	if err != nil {
+		return TfVarsArray{}, err
+	}
+
+	wrappedItems := []TfVarsValue{}
+	for _, item := range itemsSlice {
+		wrapped, err := wrapTfVarsValue(item)
+		if err != nil {
+			return TfVarsArray{}, err
+		}
+		wrappedItems = append(wrappedItems, wrapped)
+	}
+
+	return TfVarsArray(wrappedItems), nil
+}
+
+func (val TfVarsArray) Render() string {
+	return fmt.Sprintf("TfVarsArray(%v)", []TfVarsValue(val))
+}
+
+func (val TfVarsArray) String() string {
+	return val.Render()
+}
+
+type TfVarsInterpolation struct {
 	FunctionName string
 	Args         []TfVarsValue
 }
 
-func NewInterpolation(name interface{}, args interface{}) (Interpolation, error) {
+func NewInterpolation(name interface{}, args interface{}) (TfVarsInterpolation, error) {
 	argsSlice, err := toIfaceSlice(args)
 	if err != nil {
-		return Interpolation{}, err
+		return TfVarsInterpolation{}, err
 	}
 
 	parsedArgs := []TfVarsValue{}
 	for _, arg := range argsSlice {
 		parsedArg, err := wrapTfVarsValue(arg)
 		if err != nil {
-			return Interpolation{}, err
+			return TfVarsInterpolation{}, err
 		}
 		parsedArgs = append(parsedArgs, parsedArg)
 	}
 
-	return Interpolation{FunctionName: fmt.Sprintf("%v", name), Args: parsedArgs}, nil
+	return TfVarsInterpolation{FunctionName: fmt.Sprintf("%v", name), Args: parsedArgs}, nil
 }
 
-func (val Interpolation) Render() string {
-	return fmt.Sprintf("Interpolation{Name: %s, Args: %v}", val.FunctionName, val.Args)
+func (val TfVarsInterpolation) Render() string {
+	return fmt.Sprintf("TfVarsInterpolation(Name: %s, Args: %v)", val.FunctionName, val.Args)
 }
 
-func (val Interpolation) String() string {
+func (val TfVarsInterpolation) String() string {
 	return val.Render()
 }
 

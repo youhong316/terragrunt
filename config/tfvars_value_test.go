@@ -19,6 +19,9 @@ func TestParseTfVarsValue(t *testing.T) {
 		{"int", `3`, tfVars(integer(3))},
 		{"float", `3.14159`, tfVars(float(3.14159))},
 		{"bool", `true`, tfVars(boolean(true))},
+		{"empty array", `[]`, tfVars(strArray())},
+		{"string array", `["foo", "bar", "baz"]`, tfVars(strArray("foo", "bar", "baz"))},
+		{"int array", `[1, 2, 3]`, tfVars(intArray(1, 2, 3))},
 		{"interpolation", `"${foo()}"`, tfVars(interp("foo"))},
 		{"string interpolation", `"foo${bar()}"`, tfVars(str("foo"), interp("bar"))},
 		{"string interpolation string", `"foo${bar()}baz"`, tfVars(str("foo"), interp("bar"), str("baz"))},
@@ -52,29 +55,49 @@ func tfVars(parts ... TfVarsValuePart) TfVarsValue {
 	if parts == nil {
 		parts = []TfVarsValuePart{}
 	}
-	return TfVarsValue{Parts: parts}
+	return TfVarsValue(parts)
 }
 
-func str(contents string) String {
-	return String{Contents: contents}
+func str(contents string) TfVarsString {
+	return TfVarsString(contents)
 }
 
-func integer(val int) Integer {
-	return Integer{Value: val}
+func integer(val int) TfVarsInt {
+	return TfVarsInt(val)
 }
 
-func float(val float64) Float {
-	return Float{Value: val}
+func float(val float64) TfVarsFloat {
+	return TfVarsFloat(val)
 }
 
-func boolean(val bool) Boolean {
-	return Boolean{Value: val}
+func boolean(val bool) TfVarsBool {
+	return TfVarsBool(val)
 }
 
-func interp(functionName string, args ... TfVarsValue) Interpolation {
+func strArray(items ... string) TfVarsArray {
+	parts := []TfVarsValue{}
+
+	for _, item := range items {
+		parts = append(parts, NewTfVarsValue(str(item)))
+	}
+
+	return TfVarsArray(parts)
+}
+
+func intArray(items ... int) TfVarsArray {
+	parts := []TfVarsValue{}
+
+	for _, item := range items {
+		parts = append(parts, NewTfVarsValue(integer(item)))
+	}
+
+	return TfVarsArray(parts)
+}
+
+func interp(functionName string, args ... TfVarsValue) TfVarsInterpolation {
 	if args == nil {
 		args = []TfVarsValue{}
 	}
 
-	return Interpolation{FunctionName: functionName, Args: args}
+	return TfVarsInterpolation{FunctionName: functionName, Args: args}
 }

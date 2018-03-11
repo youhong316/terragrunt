@@ -4,7 +4,7 @@ package config
 
 start = val:value EOF { return wrapTfVarsValue(val) }
 
-value = str / number / boolean
+value = str / number / boolean / array
 
 str = '"' val:interpolation_or_char* '"' { return val, nil }
 
@@ -54,6 +54,12 @@ boolean = True / False
 True = "true" { return true, nil }
 False = "false" { return false, nil }
 
+
+////////// Arrays
+
+array = '[' vals:array_item* ']' { return NewArray(vals) }
+
+array_item = ws val:value ws ','? ws { return val, nil }
 
 ////////// Other
 
