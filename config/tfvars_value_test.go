@@ -3,6 +3,8 @@ package config
 import (
 	"testing"
 	"github.com/stretchr/testify/assert"
+	"github.com/gruntwork-io/terragrunt/errors"
+	"reflect"
 )
 
 func TestParseTfVarsValue(t *testing.T) {
@@ -13,8 +15,11 @@ func TestParseTfVarsValue(t *testing.T) {
 		value    string
 		expected TfVarsValue
 	} {
-		{"empty", `""`, tfVars()},
+		{"empty string", `""`, tfVars()},
 		{"string", `"foo"`, tfVars(str("foo"))},
+		{"string with curly braces", `"{foo}"`, tfVars(str("{foo}"))},
+		{"string with dollar sign", `"$foo"`, tfVars(str("$foo"))},
+		{"string with escapes", `"\"foo\""`, tfVars(str(`"foo"`))},
 		{"whitespace string", `"      "`, tfVars(str("      "))},
 		{"int", `3`, tfVars(integer(3))},
 		{"float", `3.14159`, tfVars(float(3.14159))},
@@ -37,6 +42,7 @@ func TestParseTfVarsValue(t *testing.T) {
 		{"map with multiple keys and values", `{foo = "bar", baz = 1.0, blah = true}`, tfVars(tfVarsMap(keyValue(tfVars(str("foo")), tfVars(str("bar"))), keyValue(tfVars(str("baz")), tfVars(float(1.0))), keyValue(tfVars(str("blah")), tfVars(boolean(true)))))},
 		{"map with interpolated value", `{foo = "${bar()}"}`, tfVars(tfVarsMap(keyValue(tfVars(str("foo")), tfVars(interp("bar")))))},
 		{"interpolation", `"${foo()}"`, tfVars(interp("foo"))},
+		{"escaped interpolation", `"$${foo()}"`, tfVars(str("$${foo()}"))},
 		{"string interpolation", `"foo${bar()}"`, tfVars(str("foo"), interp("bar"))},
 		{"string interpolation string", `"foo${bar()}baz"`, tfVars(str("foo"), interp("bar"), str("baz"))},
 		{"string whitespace interpolation string whitespace", `"foo   ${bar()}baz   "`, tfVars(str("foo   "), interp("bar"), str("baz   "))},
@@ -64,6 +70,65 @@ func TestParseTfVarsValue(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseTfVarsValueErrors(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		value    string
+		expected error
+	} {
+		{"empty", ``, &parserError{}},
+		{"naked value", `foo`, &parserError{}},
+		{"missing closing quote", `"foo`, &parserError{}},
+		{"missing opening quote", `foo"`, &parserError{}},
+		{"extra quote", `"foo""`, &parserError{}},
+		{"invalid number", `3.4.3`, &parserError{}},
+		{"missing closing curly brace", `"${foo()"`, InvalidInterpolation{}},
+		{"not a function call", `"${foo}"`, InvalidInterpolation{}},
+		{"missing closing bracket", `[1, 2, 3`, &parserError{}},
+		{"missing opening bracket", `1, 2, 3]`, &parserError{}},
+		{"missing comma", `[1 2 3]`, &parserError{}},
+		{"missing double quotes", `[foo]`, &parserError{}},
+		{"missing closing curly brace", `{foo = "bar"`, &parserError{}},
+		{"missing opening curly brace", `foo = "bar"}`, &parserError{}},
+		{"missing equals", `{foo "bar"}`, &parserError{}},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			actual, err := ParseTfVarsValue("test", testCase.value)
+			if assert.Error(t, err, "Expected error, but got nil. Parsed value: %v", actual) {
+				unwrapped := unwrapParserError(t, err, testCase.expected)
+				assert.IsType(t, testCase.expected, unwrapped, "Actual error message: %v", unwrapped)
+			}
+		})
+	}
+}
+
+// The parser always returns a wrapped list of parserErrors. Unwrap to the first of these.
+func unwrapParserError(t *testing.T, actualErr error, expectedErr error) error {
+	unwrapped := errors.Unwrap(actualErr)
+	list, isList := unwrapped.(errList)
+
+	if !isList || len(list) == 0 {
+		t.Fatalf("Expected error to be a non-empty errList, but got a type %v with contents %v:", reflect.TypeOf(actualErr), actualErr)
+	}
+
+	firstErr := list[0]
+	asParserErr, isParserErr := firstErr.(*parserError)
+	if !isParserErr {
+		t.Fatalf("Expected first error to be a parserError but got an error of type %v: %v", reflect.TypeOf(firstErr), firstErr)
+	}
+
+	// If we are expecting a custom error type, then we need to pull it out of the parserError
+	if reflect.TypeOf(expectedErr) != reflect.TypeOf(&parserError{}) {
+		return asParserErr.Inner
+	}
+
+	return asParserErr
 }
 
 func tfVars(parts ... TfVarsValuePart) TfVarsValue {

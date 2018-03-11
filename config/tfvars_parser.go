@@ -279,5 +279,5 @@ type InvalidInterpolation struct {
 }
 
 func (err InvalidInterpolation) Error() string {
-	return fmt.Sprintf("Expected an interpolation body of the format '%s' but got '%s'", err.ExpectedSyntax, err.ActualSyntax)
+	return fmt.Sprintf("Expected an interpolation of the format '%s' but got '%s'", err.ExpectedSyntax, err.ActualSyntax)
 }

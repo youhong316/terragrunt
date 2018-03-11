@@ -32,7 +32,7 @@ interpolation = valid_interpolation / invalid_interpolation
 
 valid_interpolation = "${" ws f:function_call ws "}" { return f, nil }
 
-invalid_interpolation = "${" [^}]* "}" { return nil, InvalidInterpolation{ExpectedSyntax: "function_name()", ActualSyntax: string(c.text)} }
+invalid_interpolation = "${" [^}]* { return nil, InvalidInterpolation{ExpectedSyntax: "${function_name()}", ActualSyntax: string(c.text)} }
 
 function_call = name:function_name ws "(" ws args:function_arg* ws ")" { return NewInterpolation(name, args) }
 
@@ -43,13 +43,15 @@ function_arg = val:value ws ","? ws { return val, nil }
 
 ////////// Strings
 
-char = unescaped / escaped
+char = escaped_interpolation / unescaped / escaped
 
 unescaped = ![\x00-\x1f"\\] . { return string(c.text), nil }
 
-escaped = '\\' ["\\/bfnrt] { return string(c.text), nil }
+escaped = '\\' val:escaped_chars { return val, nil }
 
-ws "whitespace" = [ \t\n\r]*
+escaped_interpolation = "$${" char { return string(c.text), nil }
+
+escaped_chars = ["\\/bfnrt] { return string(c.text), nil }
 
 
 ////////// Numbers
@@ -87,5 +89,7 @@ map_key = [^= \t\n\r]* { return string(c.text), nil }
 
 
 ////////// Other
+
+ws "whitespace" = [ \t\n\r]*
 
 EOF = !.
