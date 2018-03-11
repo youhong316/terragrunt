@@ -7,7 +7,7 @@
 // This grammar is designed to work with the Pigeon parser generator for Go: https://github.com/mna/pigeon. Any time
 // you change this file, you need to regenerate the Go code for it with the following command:
 //
-// go generate ./...
+// go generate $(glide novendor)
 //
 // See the pigeon GoDoc for how this PEG grammar works: https://godoc.org/github.com/mna/pigeon.
 // See this guide for a decent intro to PEG: https://github.com/PhilippeSigaud/Pegged/wiki/PEG-Basics

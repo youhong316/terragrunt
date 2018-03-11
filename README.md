@@ -1841,7 +1841,7 @@ Terragrunt uses [pigeon](https://github.com/mna/pigeon) to compile a PEG grammar
 PEG grammar in `tfvars_value.peg`, you must: 
   
 1. Install pigeon: `go get -u github.com/mna/pigeon`.
-1. Run `go generate ./...` every time you change the grammar file.
+1. Run `go generate $(glide novendor)` every time you change the grammar file.
 
 #### Running locally
 

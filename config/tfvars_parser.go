@@ -3,7 +3,7 @@
 // The comment above can be used with go generate to automatically compile the PEG grammar in tfvars_value.peg into
 // a Go parser. To have the command above take effect, before running go build, you simply run:
 //
-// go generate ./...
+// go generate $(glide novendor)
 //
 package config
 

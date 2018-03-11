@@ -16,7 +16,7 @@ dependencies:
 test:
   override:
     - make fmtcheck
-    - go generate ./...
+    - go generate $(glide novendor)
     - run-go-tests
 
 deployment:
