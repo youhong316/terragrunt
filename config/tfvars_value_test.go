@@ -1,10 +1,10 @@
 package config
 
 import (
-	"testing"
-	"github.com/stretchr/testify/assert"
 	"github.com/gruntwork-io/terragrunt/errors"
+	"github.com/stretchr/testify/assert"
 	"reflect"
+	"testing"
 )
 
 func TestParseTfVarsValue(t *testing.T) {
@@ -14,7 +14,7 @@ func TestParseTfVarsValue(t *testing.T) {
 		name     string
 		value    string
 		expected TfVarsValue
-	} {
+	}{
 		{"empty string", `""`, tfVars()},
 		{"string", `"foo"`, tfVars(str("foo"))},
 		{"string with curly braces", `"{foo}"`, tfVars(str("{foo}"))},
@@ -54,7 +54,7 @@ func TestParseTfVarsValue(t *testing.T) {
 		{"interpolation with one bool arg", `"${foo(false)}"`, tfVars(interp("foo", tfVars(boolean(false))))},
 		{"interpolation with one array arg", `"${foo(["foo", "bar", "baz"])}"`, tfVars(interp("foo", tfVars(array(t, "foo", "bar", "baz"))))},
 		{"interpolation with multiple string args", `"${foo("bar", "baz", "blah")}"`, tfVars(interp("foo", tfVars(str("bar")), tfVars(str("baz")), tfVars(str("blah"))))},
-		{"interpolation with multiple arg types", `"${foo("bar", 99999, 0.333333333, true, [42.0])}"`, tfVars(interp("foo", tfVars(str("bar")), tfVars(integer(99999)), tfVars(float(0.333333333)), tfVars(boolean(true)), tfVars(array(t,42.0))))},
+		{"interpolation with multiple arg types", `"${foo("bar", 99999, 0.333333333, true, [42.0])}"`, tfVars(interp("foo", tfVars(str("bar")), tfVars(integer(99999)), tfVars(float(0.333333333)), tfVars(boolean(true)), tfVars(array(t, 42.0))))},
 		{"interpolation with one interpolated arg", `"${foo("${bar()}")}"`, tfVars(interp("foo", tfVars(interp("bar"))))},
 		{"interpolation with one interpolated and string arg", `"${foo("abc${bar()}def")}"`, tfVars(interp("foo", tfVars(str("abc"), interp("bar"), str("def"))))},
 		{"interpolation with one interpolated arg with its own string arg", `"${foo("${bar("baz")}")}"`, tfVars(interp("foo", tfVars(interp("bar", tfVars(str("baz"))))))},
@@ -79,7 +79,7 @@ func TestParseTfVarsValueErrors(t *testing.T) {
 		name     string
 		value    string
 		expected error
-	} {
+	}{
 		{"empty", ``, &parserError{}},
 		{"naked value", `foo`, &parserError{}},
 		{"missing closing quote", `"foo`, &parserError{}},
@@ -131,7 +131,7 @@ func unwrapParserError(t *testing.T, actualErr error, expectedErr error) error {
 	return asParserErr
 }
 
-func tfVars(parts ... TfVarsValuePart) TfVarsValue {
+func tfVars(parts ...TfVarsValuePart) TfVarsValue {
 	if parts == nil {
 		parts = []TfVarsValuePart{}
 	}
@@ -154,7 +154,7 @@ func boolean(val bool) TfVarsBool {
 	return TfVarsBool(val)
 }
 
-func array(t *testing.T, items ... interface{}) TfVarsArray {
+func array(t *testing.T, items ...interface{}) TfVarsArray {
 	parts := []TfVarsValue{}
 
 	for _, item := range items {
@@ -168,7 +168,7 @@ func array(t *testing.T, items ... interface{}) TfVarsArray {
 	return TfVarsArray(parts)
 }
 
-func tfVarsMap(keyValuePairs ... TfVarsKeyValue) TfVarsMap {
+func tfVarsMap(keyValuePairs ...TfVarsKeyValue) TfVarsMap {
 	if keyValuePairs == nil {
 		keyValuePairs = []TfVarsKeyValue{}
 	}
@@ -179,7 +179,7 @@ func keyValue(key TfVarsValue, value TfVarsValue) TfVarsKeyValue {
 	return TfVarsKeyValue{Key: key, Value: value}
 }
 
-func interp(functionName string, args ... TfVarsValue) TfVarsInterpolation {
+func interp(functionName string, args ...TfVarsValue) TfVarsInterpolation {
 	if args == nil {
 		args = []TfVarsValue{}
 	}

@@ -8,9 +8,9 @@
 package config
 
 import (
+	"fmt"
 	"github.com/gruntwork-io/terragrunt/errors"
 	"reflect"
-	"fmt"
 )
 
 func ParseTfVarsValue(filename string, value string) (*TfVarsValue, error) {
@@ -63,9 +63,9 @@ func combineStrings(parts []TfVarsValuePart) []TfVarsValuePart {
 
 	for _, part := range parts {
 		if partAsString, ok := part.(TfVarsString); ok && len(combinedParts) > 0 {
-			prevPart := combinedParts[len(combinedParts) - 1]
+			prevPart := combinedParts[len(combinedParts)-1]
 			if prevPartAsString, ok := prevPart.(TfVarsString); ok {
-				combinedParts = combinedParts[:len(combinedParts) - 1]
+				combinedParts = combinedParts[:len(combinedParts)-1]
 				mergedPart := TfVarsString(string(prevPartAsString) + string(partAsString))
 				combinedParts = append(combinedParts, mergedPart)
 				continue
@@ -80,7 +80,7 @@ func combineStrings(parts []TfVarsValuePart) []TfVarsValuePart {
 
 type TfVarsValue []TfVarsValuePart
 
-func NewTfVarsValue(parts ... TfVarsValuePart) TfVarsValue {
+func NewTfVarsValue(parts ...TfVarsValuePart) TfVarsValue {
 	return TfVarsValue(parts)
 }
 
