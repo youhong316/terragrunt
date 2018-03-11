@@ -19,9 +19,13 @@ func TestParseTfVarsValue(t *testing.T) {
 		{"int", `3`, tfVars(integer(3))},
 		{"float", `3.14159`, tfVars(float(3.14159))},
 		{"bool", `true`, tfVars(boolean(true))},
-		{"empty array", `[]`, tfVars(strArray())},
-		{"string array", `["foo", "bar", "baz"]`, tfVars(strArray("foo", "bar", "baz"))},
-		{"int array", `[1, 2, 3]`, tfVars(intArray(1, 2, 3))},
+		{"empty array", `[]`, tfVars(array(t))},
+		{"string array", `["foo", "bar", "baz"]`, tfVars(array(t, "foo", "bar", "baz"))},
+		{"int array", `[1, 2, 3]`, tfVars(array(t, 1, 2, 3))},
+		{"mixed types array", `["foo", 2, true]`, tfVars(array(t, "foo", 2, true))},
+		{"array whitespace", `[    1,2     ,         3]`, tfVars(array(t, 1, 2, 3))},
+		{"nested array", `[["foo"]]`, tfVars(array(t, array(t, "foo")))},
+		{"nested arrays", `[["foo"], ["bar"], [1, 2, 3]]`, tfVars(array(t, array(t, "foo"), array(t, "bar"), array(t, 1, 2, 3)))},
 		{"interpolation", `"${foo()}"`, tfVars(interp("foo"))},
 		{"string interpolation", `"foo${bar()}"`, tfVars(str("foo"), interp("bar"))},
 		{"string interpolation string", `"foo${bar()}baz"`, tfVars(str("foo"), interp("bar"), str("baz"))},
@@ -32,13 +36,14 @@ func TestParseTfVarsValue(t *testing.T) {
 		{"interpolation with one int arg", `"${foo(42)}"`, tfVars(interp("foo", tfVars(integer(42))))},
 		{"interpolation with one float arg", `"${foo(-42.0)}"`, tfVars(interp("foo", tfVars(float(-42.0))))},
 		{"interpolation with one bool arg", `"${foo(false)}"`, tfVars(interp("foo", tfVars(boolean(false))))},
+		{"interpolation with one array arg", `"${foo(["foo", "bar", "baz"])}"`, tfVars(interp("foo", tfVars(array(t, "foo", "bar", "baz"))))},
 		{"interpolation with multiple string args", `"${foo("bar", "baz", "blah")}"`, tfVars(interp("foo", tfVars(str("bar")), tfVars(str("baz")), tfVars(str("blah"))))},
-		{"interpolation with multiple arg types", `"${foo("bar", 99999, 0.333333333, true)}"`, tfVars(interp("foo", tfVars(str("bar")), tfVars(integer(99999)), tfVars(float(0.333333333)), tfVars(boolean(true))))},
+		{"interpolation with multiple arg types", `"${foo("bar", 99999, 0.333333333, true, [42.0])}"`, tfVars(interp("foo", tfVars(str("bar")), tfVars(integer(99999)), tfVars(float(0.333333333)), tfVars(boolean(true)), tfVars(array(t,42.0))))},
 		{"interpolation with one interpolated arg", `"${foo("${bar()}")}"`, tfVars(interp("foo", tfVars(interp("bar"))))},
 		{"interpolation with one interpolated and string arg", `"${foo("abc${bar()}def")}"`, tfVars(interp("foo", tfVars(str("abc"), interp("bar"), str("def"))))},
 		{"interpolation with one interpolated arg with its own string arg", `"${foo("${bar("baz")}")}"`, tfVars(interp("foo", tfVars(interp("bar", tfVars(str("baz"))))))},
 		{"interpolation with interpolated args and literal args", `"${foo("${bar()}", -33, true, "hi")}"`, tfVars(interp("foo", tfVars(interp("bar")), tfVars(integer(-33)), tfVars(boolean(true)), tfVars(str("hi"))))},
-		{"string interpolation with interpolated args and literal args string", `"abc${foo("${bar()}", -33, true, "hi")}def"`, tfVars(str("abc"), interp("foo", tfVars(interp("bar")), tfVars(integer(-33)), tfVars(boolean(true)), tfVars(str("hi"))), str("def"))},
+		{"string interpolation with interpolated args and literal args string", `"abc${foo("${bar([true, true, true])}", -33, true, "hi")}def"`, tfVars(str("abc"), interp("foo", tfVars(interp("bar", tfVars(array(t, true, true, true)))), tfVars(integer(-33)), tfVars(boolean(true)), tfVars(str("hi"))), str("def"))},
 	}
 
 	for _, testCase := range testCases {
@@ -74,21 +79,15 @@ func boolean(val bool) TfVarsBool {
 	return TfVarsBool(val)
 }
 
-func strArray(items ... string) TfVarsArray {
+func array(t *testing.T, items ... interface{}) TfVarsArray {
 	parts := []TfVarsValue{}
 
 	for _, item := range items {
-		parts = append(parts, NewTfVarsValue(str(item)))
-	}
-
-	return TfVarsArray(parts)
-}
-
-func intArray(items ... int) TfVarsArray {
-	parts := []TfVarsValue{}
-
-	for _, item := range items {
-		parts = append(parts, NewTfVarsValue(integer(item)))
+		wrapped, err := wrapTfVarsValue(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts = append(parts, wrapped)
 	}
 
 	return TfVarsArray(parts)
