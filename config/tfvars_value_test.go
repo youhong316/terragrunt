@@ -22,10 +22,20 @@ func TestParseTfVarsValue(t *testing.T) {
 		{"empty array", `[]`, tfVars(array(t))},
 		{"string array", `["foo", "bar", "baz"]`, tfVars(array(t, "foo", "bar", "baz"))},
 		{"int array", `[1, 2, 3]`, tfVars(array(t, 1, 2, 3))},
+		{"array with maps", `[{}, {foo = "bar"}]`, tfVars(array(t, tfVarsMap(), tfVarsMap(keyValue(tfVars(str("foo")), tfVars(str("bar"))))))},
 		{"mixed types array", `["foo", 2, true]`, tfVars(array(t, "foo", 2, true))},
 		{"array whitespace", `[    1,2     ,         3]`, tfVars(array(t, 1, 2, 3))},
 		{"nested array", `[["foo"]]`, tfVars(array(t, array(t, "foo")))},
 		{"nested arrays", `[["foo"], ["bar"], [1, 2, 3]]`, tfVars(array(t, array(t, "foo"), array(t, "bar"), array(t, 1, 2, 3)))},
+		{"array with interpolation", `["${foo()}"]`, tfVars(array(t, interp("foo")))},
+		{"empty map", `{}`, tfVars(tfVarsMap())},
+		{"map with string key string value", `{foo = "bar"}`, tfVars(tfVarsMap(keyValue(tfVars(str("foo")), tfVars(str("bar")))))},
+		{"map with string key int value", `{foo = 5}`, tfVars(tfVarsMap(keyValue(tfVars(str("foo")), tfVars(integer(5)))))},
+		{"map with string key bool value", `{foo = true}`, tfVars(tfVarsMap(keyValue(tfVars(str("foo")), tfVars(boolean(true)))))},
+		{"map with string key array value", `{foo = [1, 2, 3]}`, tfVars(tfVarsMap(keyValue(tfVars(str("foo")), tfVars(array(t, 1, 2, 3)))))},
+		{"map with string key map value", `{foo = {bar = "baz"}}`, tfVars(tfVarsMap(keyValue(tfVars(str("foo")), tfVars(tfVarsMap(keyValue(tfVars(str("bar")), tfVars(str("baz"))))))))},
+		{"map with multiple keys and values", `{foo = "bar", baz = 1.0, blah = true}`, tfVars(tfVarsMap(keyValue(tfVars(str("foo")), tfVars(str("bar"))), keyValue(tfVars(str("baz")), tfVars(float(1.0))), keyValue(tfVars(str("blah")), tfVars(boolean(true)))))},
+		{"map with interpolated value", `{foo = "${bar()}"}`, tfVars(tfVarsMap(keyValue(tfVars(str("foo")), tfVars(interp("bar")))))},
 		{"interpolation", `"${foo()}"`, tfVars(interp("foo"))},
 		{"string interpolation", `"foo${bar()}"`, tfVars(str("foo"), interp("bar"))},
 		{"string interpolation string", `"foo${bar()}baz"`, tfVars(str("foo"), interp("bar"), str("baz"))},
@@ -42,7 +52,7 @@ func TestParseTfVarsValue(t *testing.T) {
 		{"interpolation with one interpolated arg", `"${foo("${bar()}")}"`, tfVars(interp("foo", tfVars(interp("bar"))))},
 		{"interpolation with one interpolated and string arg", `"${foo("abc${bar()}def")}"`, tfVars(interp("foo", tfVars(str("abc"), interp("bar"), str("def"))))},
 		{"interpolation with one interpolated arg with its own string arg", `"${foo("${bar("baz")}")}"`, tfVars(interp("foo", tfVars(interp("bar", tfVars(str("baz"))))))},
-		{"interpolation with interpolated args and literal args", `"${foo("${bar()}", -33, true, "hi")}"`, tfVars(interp("foo", tfVars(interp("bar")), tfVars(integer(-33)), tfVars(boolean(true)), tfVars(str("hi"))))},
+		{"interpolation with interpolated args and literal args", `"${foo("${bar()}", -33, true, "hi", {foo = "bar"})}"`, tfVars(interp("foo", tfVars(interp("bar")), tfVars(integer(-33)), tfVars(boolean(true)), tfVars(str("hi")), tfVars(tfVarsMap(keyValue(tfVars(str("foo")), tfVars(str("bar")))))))},
 		{"string interpolation with interpolated args and literal args string", `"abc${foo("${bar([true, true, true])}", -33, true, "hi")}def"`, tfVars(str("abc"), interp("foo", tfVars(interp("bar", tfVars(array(t, true, true, true)))), tfVars(integer(-33)), tfVars(boolean(true)), tfVars(str("hi"))), str("def"))},
 	}
 
@@ -91,6 +101,17 @@ func array(t *testing.T, items ... interface{}) TfVarsArray {
 	}
 
 	return TfVarsArray(parts)
+}
+
+func tfVarsMap(keyValuePairs ... TfVarsKeyValue) TfVarsMap {
+	if keyValuePairs == nil {
+		keyValuePairs = []TfVarsKeyValue{}
+	}
+	return TfVarsMap(keyValuePairs)
+}
+
+func keyValue(key TfVarsValue, value TfVarsValue) TfVarsKeyValue {
+	return TfVarsKeyValue{Key: key, Value: value}
 }
 
 func interp(functionName string, args ... TfVarsValue) TfVarsInterpolation {

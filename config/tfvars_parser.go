@@ -39,6 +39,8 @@ func wrapTfVarsValue(val interface{}) (TfVarsValue, error) {
 		return NewTfVarsValue(TfVarsBool(v)), nil
 	case TfVarsArray:
 		return NewTfVarsValue(v), nil
+	case TfVarsMap:
+		return NewTfVarsValue(v), nil
 	case TfVarsInterpolation:
 		return NewTfVarsValue(v), nil
 	case []interface{}:
@@ -74,25 +76,6 @@ func combineStrings(parts []TfVarsValuePart) []TfVarsValuePart {
 	}
 
 	return combinedParts
-}
-
-type UnexpectedParserReturnType struct {
-	ExpectedType string
-	ActualType   reflect.Type
-	Value        interface{}
-}
-
-func (err UnexpectedParserReturnType) Error() string {
-	return fmt.Sprintf("Expected parser to return type %v but got %v. Value: %v", err.ExpectedType, err.ActualType, err.Value)
-}
-
-type UnexpectedListLength struct {
-	ExpectedLength int
-	ActualLength   int
-}
-
-func (err UnexpectedListLength) Error() string {
-	return fmt.Sprintf("Expected parser to return a list of length %d but got %d", err.ExpectedLength, err.ActualLength)
 }
 
 type TfVarsValue []TfVarsValuePart
@@ -173,6 +156,63 @@ func (val TfVarsArray) String() string {
 	return val.Render()
 }
 
+type TfVarsMap []TfVarsKeyValue
+
+type KeyValue struct {
+	Key   interface{}
+	Value interface{}
+}
+
+func (keyValue KeyValue) String() string {
+	return fmt.Sprintf("KeyValue('%v': '%v')", keyValue.Key, keyValue.Value)
+}
+
+type TfVarsKeyValue struct {
+	Key   TfVarsValue
+	Value TfVarsValue
+}
+
+func (keyValue TfVarsKeyValue) String() string {
+	return fmt.Sprintf("TfVarsKeyValue('%v': '%v')", keyValue.Key, keyValue.Value)
+}
+
+func NewMap(items interface{}) (TfVarsMap, error) {
+	itemsSlice, err := toIfaceSlice(items)
+	if err != nil {
+		return TfVarsMap{}, err
+	}
+
+	wrappedItems := []TfVarsKeyValue{}
+	for _, item := range itemsSlice {
+		asKeyValue, isKeyValue := item.(KeyValue)
+		if !isKeyValue {
+			return TfVarsMap{}, errors.WithStackTrace(UnexpectedParserReturnType{ExpectedType: "KeyValue", ActualType: reflect.TypeOf(item), Value: item})
+		}
+
+		wrappedKey, err := wrapTfVarsValue(asKeyValue.Key)
+		if err != nil {
+			return TfVarsMap{}, err
+		}
+
+		wrappedValue, err := wrapTfVarsValue(asKeyValue.Value)
+		if err != nil {
+			return TfVarsMap{}, err
+		}
+
+		wrappedItems = append(wrappedItems, TfVarsKeyValue{Key: wrappedKey, Value: wrappedValue})
+	}
+
+	return TfVarsMap(wrappedItems), nil
+}
+
+func (val TfVarsMap) Render() string {
+	return fmt.Sprintf("TfVarsMap(%v)", []TfVarsKeyValue(val))
+}
+
+func (val TfVarsMap) String() string {
+	return val.Render()
+}
+
 type TfVarsInterpolation struct {
 	FunctionName string
 	Args         []TfVarsValue
@@ -210,6 +250,27 @@ func toIfaceSlice(value interface{}) ([]interface{}, error) {
 		return nil, errors.WithStackTrace(UnexpectedParserReturnType{ExpectedType: "[]interface{}", ActualType: reflect.TypeOf(value), Value: value})
 	}
 	return slice, nil
+}
+
+// Custom error types
+
+type UnexpectedParserReturnType struct {
+	ExpectedType string
+	ActualType   reflect.Type
+	Value        interface{}
+}
+
+func (err UnexpectedParserReturnType) Error() string {
+	return fmt.Sprintf("Expected parser to return type %v but got %v. Value: %v", err.ExpectedType, err.ActualType, err.Value)
+}
+
+type UnexpectedListLength struct {
+	ExpectedLength int
+	ActualLength   int
+}
+
+func (err UnexpectedListLength) Error() string {
+	return fmt.Sprintf("Expected parser to return a list of length %d but got %d", err.ExpectedLength, err.ActualLength)
 }
 
 type InvalidInterpolation struct {

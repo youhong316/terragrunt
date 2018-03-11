@@ -1,12 +1,16 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // This is a PEG grammar that can be used to create a parser for values you can put in a Terraform .tfvars file. This
-// grammar is designed to work with the Pigeon parser generator for Go: https://github.com/mna/pigeon.
+// is a subset of HCL: https://github.com/hashicorp/hcl. The reason we don't use the HCL parser directly is that we
+// need to parse "interpolations" such as "${foo()}" the way Terraform parses them, but interpolations are only part
+// of Terraform itself and not HCL.
 //
-// Any time you change this file, you need to regenerate the Go code for it with the following command:
+// This grammar is designed to work with the Pigeon parser generator for Go: https://github.com/mna/pigeon. Any time
+// you change this file, you need to regenerate the Go code for it with the following command:
 //
 // go generate ./...
 //
 // See the pigeon GoDoc for how this PEG grammar works: https://godoc.org/github.com/mna/pigeon.
+// See this guide for a decent intro to PEG: https://github.com/PhilippeSigaud/Pegged/wiki/PEG-Basics
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 {
@@ -15,9 +19,9 @@ package config
 
 start = val:value EOF { return wrapTfVarsValue(val) }
 
-value = str / number / boolean / array
+value = str / number / boolean / array / Map
 
-str = '"' val:interpolation_or_char* '"' { return val, nil }
+str "string" = '"' val:interpolation_or_char* '"' { return val, nil }
 
 interpolation_or_char = interpolation / char
 
@@ -71,6 +75,16 @@ False = "false" { return false, nil }
 array = '[' vals:array_item* ']' { return NewArray(vals) }
 
 array_item = ws val:value ws ','? ws { return val, nil }
+
+
+////////// Maps
+
+Map = '{' ws vals:map_item* ws '}' { return NewMap(vals) }
+
+map_item = ws key:map_key ws '=' ws val:value ws ','? { return KeyValue{Key: key, Value: val}, nil }
+
+map_key = [^= \t\n\r]* { return string(c.text), nil }
+
 
 ////////// Other
 
