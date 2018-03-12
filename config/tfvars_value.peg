@@ -45,11 +45,11 @@ function_arg = val:value ws ","? ws { return val, nil }
 
 char = escaped_interpolation / unescaped / escaped
 
+escaped_interpolation = "$${" char { return string(c.text), nil }
+
 unescaped = ![\x00-\x1f"\\] . { return string(c.text), nil }
 
 escaped = '\\' val:escaped_chars { return val, nil }
-
-escaped_interpolation = "$${" char { return string(c.text), nil }
 
 escaped_chars = ["\\/bfnrt] { return string(c.text), nil }
 

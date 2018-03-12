@@ -352,18 +352,40 @@ var g = &grammar{
 			},
 		},
 		{
-			name: "unescaped",
+			name: "escaped_interpolation",
 			pos:  position{line: 48, col: 1, offset: 1937},
 			expr: &actionExpr{
-				pos: position{line: 48, col: 13, offset: 1949},
+				pos: position{line: 48, col: 25, offset: 1961},
+				run: (*parser).callonescaped_interpolation1,
+				expr: &seqExpr{
+					pos: position{line: 48, col: 25, offset: 1961},
+					exprs: []interface{}{
+						&litMatcher{
+							pos:        position{line: 48, col: 25, offset: 1961},
+							val:        "$${",
+							ignoreCase: false,
+						},
+						&ruleRefExpr{
+							pos:  position{line: 48, col: 31, offset: 1967},
+							name: "char",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "unescaped",
+			pos:  position{line: 50, col: 1, offset: 2004},
+			expr: &actionExpr{
+				pos: position{line: 50, col: 13, offset: 2016},
 				run: (*parser).callonunescaped1,
 				expr: &seqExpr{
-					pos: position{line: 48, col: 13, offset: 1949},
+					pos: position{line: 50, col: 13, offset: 2016},
 					exprs: []interface{}{
 						&notExpr{
-							pos: position{line: 48, col: 13, offset: 1949},
+							pos: position{line: 50, col: 13, offset: 2016},
 							expr: &charClassMatcher{
-								pos:        position{line: 48, col: 14, offset: 1950},
+								pos:        position{line: 50, col: 14, offset: 2017},
 								val:        "[\\x00-\\x1f\"\\\\]",
 								chars:      []rune{'"', '\\'},
 								ranges:     []rune{'\x00', '\x1f'},
@@ -372,7 +394,7 @@ var g = &grammar{
 							},
 						},
 						&anyMatcher{
-							line: 48, col: 29, offset: 1965,
+							line: 50, col: 29, offset: 2032,
 						},
 					},
 				},
@@ -380,47 +402,25 @@ var g = &grammar{
 		},
 		{
 			name: "escaped",
-			pos:  position{line: 50, col: 1, offset: 1999},
+			pos:  position{line: 52, col: 1, offset: 2066},
 			expr: &actionExpr{
-				pos: position{line: 50, col: 11, offset: 2009},
+				pos: position{line: 52, col: 11, offset: 2076},
 				run: (*parser).callonescaped1,
 				expr: &seqExpr{
-					pos: position{line: 50, col: 11, offset: 2009},
+					pos: position{line: 52, col: 11, offset: 2076},
 					exprs: []interface{}{
 						&litMatcher{
-							pos:        position{line: 50, col: 11, offset: 2009},
+							pos:        position{line: 52, col: 11, offset: 2076},
 							val:        "\\",
 							ignoreCase: false,
 						},
 						&labeledExpr{
-							pos:   position{line: 50, col: 16, offset: 2014},
+							pos:   position{line: 52, col: 16, offset: 2081},
 							label: "val",
 							expr: &ruleRefExpr{
-								pos:  position{line: 50, col: 20, offset: 2018},
+								pos:  position{line: 52, col: 20, offset: 2085},
 								name: "escaped_chars",
 							},
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "escaped_interpolation",
-			pos:  position{line: 52, col: 1, offset: 2053},
-			expr: &actionExpr{
-				pos: position{line: 52, col: 25, offset: 2077},
-				run: (*parser).callonescaped_interpolation1,
-				expr: &seqExpr{
-					pos: position{line: 52, col: 25, offset: 2077},
-					exprs: []interface{}{
-						&litMatcher{
-							pos:        position{line: 52, col: 25, offset: 2077},
-							val:        "$${",
-							ignoreCase: false,
-						},
-						&ruleRefExpr{
-							pos:  position{line: 52, col: 31, offset: 2083},
-							name: "char",
 						},
 					},
 				},
@@ -896,6 +896,16 @@ func (p *parser) callonfunction_arg1() (interface{}, error) {
 	return p.cur.onfunction_arg1(stack["val"])
 }
 
+func (c *current) onescaped_interpolation1() (interface{}, error) {
+	return string(c.text), nil
+}
+
+func (p *parser) callonescaped_interpolation1() (interface{}, error) {
+	stack := p.vstack[len(p.vstack)-1]
+	_ = stack
+	return p.cur.onescaped_interpolation1()
+}
+
 func (c *current) onunescaped1() (interface{}, error) {
 	return string(c.text), nil
 }
@@ -914,16 +924,6 @@ func (p *parser) callonescaped1() (interface{}, error) {
 	stack := p.vstack[len(p.vstack)-1]
 	_ = stack
 	return p.cur.onescaped1(stack["val"])
-}
-
-func (c *current) onescaped_interpolation1() (interface{}, error) {
-	return string(c.text), nil
-}
-
-func (p *parser) callonescaped_interpolation1() (interface{}, error) {
-	stack := p.vstack[len(p.vstack)-1]
-	_ = stack
-	return p.cur.onescaped_interpolation1()
 }
 
 func (c *current) onescaped_chars1() (interface{}, error) {

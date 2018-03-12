@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"github.com/gruntwork-io/terragrunt/errors"
 	"reflect"
+	"github.com/gruntwork-io/terragrunt/options"
+	"strings"
 )
 
 // Parse a value from a Terraform .tfvars file. For example, if the .tfvars file contains:
@@ -25,7 +27,7 @@ import (
 //
 // The parsing and processing of interpolation functions is only available in Terraform and not HCL itself, so we have
 // created our own parser for them here.
-func ParseTfVarsValue(filename string, value string) (*TfVarsValue, error) {
+func ParseTfVarsValue(filename string, value string) (TfVarsValue, error) {
 	out, err := Parse(filename, []byte(value))
 	if err != nil {
 		return nil, errors.WithStackTrace(err)
@@ -33,101 +35,160 @@ func ParseTfVarsValue(filename string, value string) (*TfVarsValue, error) {
 
 	tfVarsValue, ok := out.(TfVarsValue)
 	if !ok {
-		return nil, errors.WithStackTrace(UnexpectedParserReturnType{ExpectedType: "[]TfVarsValuePart", ActualType: reflect.TypeOf(out), Value: out})
+		return nil, errors.WithStackTrace(UnexpectedParserReturnType{ExpectedType: "TfVarsValue", ActualType: reflect.TypeOf(out), Value: out})
 	}
 
-	return &tfVarsValue, nil
+	return tfVarsValue, nil
 }
 
 // Take a value returned by the PEG parser and depending on its type, wrap it with an appropriate TfVarsValue.
 func wrapTfVarsValue(val interface{}) (TfVarsValue, error) {
 	switch v := val.(type) {
-	case string:
-		return NewTfVarsValue(TfVarsString(v)), nil
 	case int:
-		return NewTfVarsValue(TfVarsInt(v)), nil
+		return TfVarsInt(v), nil
 	case float64:
-		return NewTfVarsValue(TfVarsFloat(v)), nil
+		return TfVarsFloat(v), nil
 	case bool:
-		return NewTfVarsValue(TfVarsBool(v)), nil
+		return TfVarsBool(v), nil
+	case TfVarsString:
+		return v, nil
 	case TfVarsArray:
-		return NewTfVarsValue(v), nil
+		return v, nil
 	case TfVarsMap:
-		return NewTfVarsValue(v), nil
-	case TfVarsInterpolation:
-		return NewTfVarsValue(v), nil
+		return v, nil
+	case string:
+		return wrapTfVarsSlice([]interface{}{v})
 	case []interface{}:
 		return wrapTfVarsSlice(v)
 	default:
-		return TfVarsValue{}, errors.WithStackTrace(UnexpectedParserReturnType{ExpectedType: "string, int, float64, bool, TfVarsArray, TfVarsMap, TfVarsInterpolation, or []interface{}", ActualType: reflect.TypeOf(val), Value: val})
+		return nil, errors.WithStackTrace(UnexpectedParserReturnType{ExpectedType: "int, float64, bool, TfVarsString, TfVarsArray, TfVarsMap, or []interface{}", ActualType: reflect.TypeOf(val), Value: val})
 	}
 }
 
-// Take a slice returned by the PEG parser and, depending on its type, wrap it with an appropriate TfVarsValue. If the
-// slice contains strings, this method will combine adjacent strings down into a single string.
-func wrapTfVarsSlice(slice []interface{}) (TfVarsValue, error) {
-	parts := []TfVarsValuePart{}
+// Take a slice returned by the PEG parser, which we should only get for strings, and wrap it as a TfVarsString.
+func wrapTfVarsSlice(slice []interface{}) (TfVarsString, error) {
+	out := []TfVarsValue{}
+
 	for _, item := range slice {
-		collapsed, err := wrapTfVarsValue(item)
-		if err != nil {
-			return TfVarsValue{}, err
-		}
-		parts = append(parts, []TfVarsValuePart(collapsed)...)
-	}
-	return TfVarsValue(combineStrings(parts)), nil
-}
+		switch v := item.(type) {
+		case string:
+			// The PEG parser parses one character at a time, so we may get a bunch of strings in a row in the slice.
+			// Instead of storing each one as a separate TfVarsChars, we use prev to combine adjacent strings together.
+			next := TfVarsChars(v)
 
-// Go through the list of TfVarsValueParts and combine adjacent TfVarsStrings into a single TfVarsString. The reason we
-// do this is that the PEG parser reads text one character at a time, so it may return a separate TfVarsString for
-// each character of a string, which is quite inconvenient for processing. This method combines those strings into one.
-func combineStrings(parts []TfVarsValuePart) []TfVarsValuePart {
-	combinedParts := []TfVarsValuePart{}
-
-	for _, currPart := range parts {
-		if currPartAsString, currPartIsString := currPart.(TfVarsString); currPartIsString && len(combinedParts) > 0 {
-			prevPart := combinedParts[len(combinedParts)-1]
-			if prevPartAsString, prevPartIsString := prevPart.(TfVarsString); prevPartIsString {
-				combinedParts = combinedParts[:len(combinedParts)-1]
-				currPart = TfVarsString(string(prevPartAsString) + string(currPartAsString))
+			if len(out) > 0 {
+				prev := out[len(out) - 1]
+				prevAsChars, prevIsChars := prev.(TfVarsChars)
+				if prevIsChars {
+					out = out[:len(out) - 1]
+					next = TfVarsChars(string(prevAsChars) + v)
+				}
 			}
-		}
 
-		combinedParts = append(combinedParts, currPart)
+			out = append(out, next)
+		case TfVarsInterpolation:
+			out = append(out, v)
+		default:
+			return nil, errors.WithStackTrace(UnexpectedParserReturnType{ExpectedType: "string or TfVarsInterpolation", ActualType: reflect.TypeOf(item), Value: item})
+		}
 	}
 
-	return combinedParts
+	return TfVarsString(out), nil
 }
 
-// An AST that represents a single value in a .tfvars file. Each value may consists of multiple TfVarsValuePart parts.
-type TfVarsValue []TfVarsValuePart
-
-// Create a new TfVarsValue from the given parts
-func NewTfVarsValue(parts ...TfVarsValuePart) TfVarsValue {
-	return TfVarsValue(parts)
-}
-
-// Represents one part of a value in a .tfvars file, such as a string, int, or bool.
-type TfVarsValuePart interface {
-	// Go is a shitty language, so a struct only implements an interface if it implements all the methods from that
-	// interface. We don't actually need any methods in TfVarsValuePart, so we have to have this useless marker method
-	// here so subtypes have something to implement. For more info, see: https://golang.org/doc/faq#guarantee_satisfies_interface
-	ImplementsTfVarsValue()
+// An AST that represents a single value in a .tfvars file, such as a string, interpolation, int, etc.
+type TfVarsValue interface {
+	// Resolve the value. For all "primitive" types such as string, int, etc, this should just return the underlying
+	// value. For interpolations, this should execute the interpolation and return the result.
+	Resolve(include *IncludeConfig, terragruntOptions *options.TerragruntOptions) (interface{}, error)
 }
 
 // A wrapper type for a string in a .tfvars file. E.g.
 //
 // foo = "bar"
 //
-type TfVarsString string
+// Note that a string could also contain an interpolation:
+//
+// foo = "${bar()}"
+//
+// Or even a mix of string and interpolation:
+//
+// foo = "abc ${def()} ghi"
+//
+// Therefore, we represent a string as a list of TfVarsValue parts.
+type TfVarsString []TfVarsValue
 
 // Implement the Go Stringer interface
 func (val TfVarsString) String() string {
-	return fmt.Sprintf("TfVarsString(%s)", string(val))
+	out := []string{}
+
+	for _, part := range val {
+		out = append(out, fmt.Sprintf("%v", part))
+	}
+
+	return fmt.Sprintf("TfVarsString(%s)", strings.Join(out, ""))
 }
 
-// This useless empty method is necessary to label this struct as implementing the TfVarsValuePart interface
-func (val TfVarsString) ImplementsTfVarsValue() {}
+// Implement the TfVarsValue interface
+func (val TfVarsString) Resolve(include *IncludeConfig, terragruntOptions *options.TerragruntOptions) (interface{}, error) {
+	resolved, isResolved, err := val.resolveIfSingleInterpolation(include, terragruntOptions)
+	if err != nil {
+		return nil, err
+	}
+	if isResolved {
+		return resolved, nil
+	}
 
+	out := []string{}
+
+	for _, part := range val {
+		resolved, err := part.Resolve(include, terragruntOptions)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, fmt.Sprintf("%v", resolved))
+	}
+
+	return strings.Join(out, ""), nil
+}
+
+// If this TfVarsString contains a single item which is an interpolation. E.g.,:
+//
+// foo = "${bar()}"
+//
+// Then we resolve it immediately, return whatever the underlying interpolation returned, and true; otherwise, we
+// return false. We handle this as a special case because the single interpolation sometimes needs to be rendered not
+// as a string but as an array or map.
+func (val TfVarsString) resolveIfSingleInterpolation(include *IncludeConfig, terragruntOptions *options.TerragruntOptions) (interface{}, bool, error) {
+	if len(val) != 1 {
+		return nil, false, nil
+	}
+
+	asInterpolation, isInterpolation := val[0].(TfVarsInterpolation)
+	if !isInterpolation {
+		return nil, false, nil
+	}
+
+	resolved, err := asInterpolation.Resolve(include, terragruntOptions)
+	return resolved, true, err
+}
+
+// A wrapper type for a string in a .tfvars file. E.g.
+//
+// foo = "bar"
+//
+// Note that unlike TfVarsString, this type can ONLY contain plain characters and no interpolations.
+type TfVarsChars string
+
+// Implement the Go Stringer interface
+func (val TfVarsChars) String() string {
+	return fmt.Sprintf("TfVarsChars(%s)", string(val))
+}
+
+// Implement the TfVarsValue interface
+func (val TfVarsChars) Resolve(include *IncludeConfig, terragruntOptions *options.TerragruntOptions) (interface{}, error) {
+	return string(val), nil
+}
 
 // A wrapper type for an int in a .tfvars file. E.g.
 //
@@ -140,8 +201,10 @@ func (val TfVarsInt) String() string {
 	return fmt.Sprintf("TfVarsInt(%d)", int(val))
 }
 
-// This useless empty method is necessary to label this struct as implementing the TfVarsValuePart interface
-func (val TfVarsInt) ImplementsTfVarsValue() {}
+// Implement the TfVarsValue interface
+func (val TfVarsInt) Resolve(include *IncludeConfig, terragruntOptions *options.TerragruntOptions) (interface{}, error) {
+	return int(val), nil
+}
 
 // A wrapper type for a float in a .tfvars file. E.g.
 //
@@ -154,8 +217,10 @@ func (val TfVarsFloat) String() string {
 	return fmt.Sprintf("TfVarsFloat(%f)", float64(val))
 }
 
-// This useless empty method is necessary to label this struct as implementing the TfVarsValuePart interface
-func (val TfVarsFloat) ImplementsTfVarsValue() {}
+// Implement the TfVarsValue interface
+func (val TfVarsFloat) Resolve(include *IncludeConfig, terragruntOptions *options.TerragruntOptions) (interface{}, error) {
+	return float64(val), nil
+}
 
 // A wrapper type for a bool in a .tfvars file. E.g.
 //
@@ -168,8 +233,10 @@ func (val TfVarsBool) String() string {
 	return fmt.Sprintf("TfVarsBool(%s)", bool(val))
 }
 
-// This useless empty method is necessary to label this struct as implementing the TfVarsValuePart interface
-func (val TfVarsBool) ImplementsTfVarsValue() {}
+// Implement the TfVarsValue interface
+func (val TfVarsBool) Resolve(include *IncludeConfig, terragruntOptions *options.TerragruntOptions) (interface{}, error) {
+	return bool(val), nil
+}
 
 // A wrapper type for an array in a .tfvars file. E.g.
 //
@@ -202,8 +269,20 @@ func (val TfVarsArray) String() string {
 	return fmt.Sprintf("TfVarsArray(%v)", []TfVarsValue(val))
 }
 
-// This useless empty method is necessary to label this struct as implementing the TfVarsValuePart interface
-func (val TfVarsArray) ImplementsTfVarsValue() {}
+// Implement the TfVarsValue interface
+func (val TfVarsArray) Resolve(include *IncludeConfig, terragruntOptions *options.TerragruntOptions) (interface{}, error) {
+	resolved := []interface{}{}
+
+	for _, item := range val {
+		resolvedItem, err := item.Resolve(include, terragruntOptions)
+		if err != nil {
+			return nil, err
+		}
+		resolved = append(resolved, resolvedItem)
+	}
+
+	return resolved, nil
+}
 
 // A wrapper type for a map in a .tfvars file. E.g.
 //
@@ -215,32 +294,6 @@ func (val TfVarsArray) ImplementsTfVarsValue() {}
 // of those types as a list, we cannot simply wrap the native Go map, as that does not allow using a slice for a key.
 // Instead, we treat a map as a list of (key, value) pairs.
 type TfVarsMap []TfVarsKeyValue
-
-// Go doesn't have tuples, so this is a small wrapper struct the PEG parser can use to wrap a (key, value) pair
-type KeyValue struct {
-	Key   interface{}
-	Value interface{}
-}
-
-// Implement the Go Stringer interface
-func (keyValue KeyValue) String() string {
-	return fmt.Sprintf("KeyValue('%v': '%v')", keyValue.Key, keyValue.Value)
-}
-
-// Used to store a (key, value) pair where the key and the value can be a value from a .tfvars file (e.g., string,
-// interpolation, int, etc.)
-type TfVarsKeyValue struct {
-	Key   TfVarsValue
-	Value TfVarsValue
-}
-
-// Implement the Go Stringer interface
-func (keyValue TfVarsKeyValue) String() string {
-	return fmt.Sprintf("TfVarsKeyValue('%v': '%v')", keyValue.Key, keyValue.Value)
-}
-
-// This useless empty method is necessary to label this struct as implementing the TfVarsValuePart interface
-func (val TfVarsKeyValue) ImplementsTfVarsValue() {}
 
 // Create a map for an interface returned by the PEG parser. We expect the interface to contain a slice of interfaces,
 // each of which is actually of type KeyValue.
@@ -278,8 +331,26 @@ func (val TfVarsMap) String() string {
 	return fmt.Sprintf("TfVarsMap(%v)", []TfVarsKeyValue(val))
 }
 
-// This useless empty method is necessary to label this struct as implementing the TfVarsValuePart interface
-func (val TfVarsMap) ImplementsTfVarsValue() {}
+// Implement the TfVarsValue interface
+func (val TfVarsMap) Resolve(include *IncludeConfig, terragruntOptions *options.TerragruntOptions) (interface{}, error) {
+	resolved := map[interface{}]interface{}{}
+
+	for _, keyValue := range val {
+		resolvedKey, err := keyValue.Key.Resolve(include, terragruntOptions)
+		if err != nil {
+			return nil, err
+		}
+
+		resolvedValue, err := keyValue.Value.Resolve(include, terragruntOptions)
+		if err != nil {
+			return nil, err
+		}
+
+		resolved[resolvedKey] = resolvedValue
+	}
+
+	return resolved, nil
+}
 
 // A wrapper type for an interpolation in a .tfvars file. E.g.
 //
@@ -316,8 +387,43 @@ func (val TfVarsInterpolation) String() string {
 	return fmt.Sprintf("TfVarsInterpolation(Name: %s, Args: %v)", val.FunctionName, val.Args)
 }
 
-// This useless empty method is necessary to label this struct as implementing the TfVarsValuePart interface
-func (val TfVarsInterpolation) ImplementsTfVarsValue() {}
+// Implement the TfVarsValue interface
+func (val TfVarsInterpolation) Resolve(include *IncludeConfig, terragruntOptions *options.TerragruntOptions) (interface{}, error) {
+	resolvedArgs := []interface{}{}
+
+	for _, arg := range val.Args {
+		resolvedArg, err := arg.Resolve(include, terragruntOptions)
+		if err != nil {
+			return nil, err
+		}
+		resolvedArgs = append(resolvedArgs, resolvedArg)
+	}
+
+	return executeTerragruntHelperFunction(val.FunctionName, resolvedArgs, include, terragruntOptions)
+}
+
+// Go doesn't have tuples, so this is a small wrapper struct the PEG parser can use to wrap a (key, value) pair
+type KeyValue struct {
+	Key   interface{}
+	Value interface{}
+}
+
+// Implement the Go Stringer interface
+func (keyValue KeyValue) String() string {
+	return fmt.Sprintf("KeyValue('%v': '%v')", keyValue.Key, keyValue.Value)
+}
+
+// Used to store a (key, value) pair where the key and the value can be a value from a .tfvars file (e.g., string,
+// interpolation, int, etc.)
+type TfVarsKeyValue struct {
+	Key   TfVarsValue
+	Value TfVarsValue
+}
+
+// Implement the Go Stringer interface
+func (keyValue TfVarsKeyValue) String() string {
+	return fmt.Sprintf("TfVarsKeyValue('%v': '%v')", keyValue.Key, keyValue.Value)
+}
 
 // Convert the given interface to a slice of interfaces. The PEG parser mostly returns interface for everything, but
 // under the hood, most of the values are actually slices of interfaces, so this is a reusable method for doing the
