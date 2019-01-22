@@ -45,6 +45,18 @@ func parseTerragruntOptionsFromArgs(args []string, writer, errWriter io.Writer) 
 		return nil, err
 	}
 
+	downloadDirRaw, err := parseStringArg(args, OPT_DOWNLOAD_DIR, os.Getenv("TERRAGRUNT_DOWNLOAD"))
+	if err != nil {
+		return nil, err
+	}
+	if downloadDirRaw == "" {
+		downloadDirRaw = util.JoinPath(workingDir, options.TerragruntCacheDir)
+	}
+	downloadDir, err := filepath.Abs(downloadDirRaw)
+	if err != nil {
+		return nil, errors.WithStackTrace(err)
+	}
+
 	terragruntConfigPath, err := parseStringArg(args, OPT_TERRAGRUNT_CONFIG, os.Getenv("TERRAGRUNT_CONFIG"))
 	if err != nil {
 		return nil, err
@@ -75,6 +87,16 @@ func parseTerragruntOptionsFromArgs(args []string, writer, errWriter io.Writer) 
 		return nil, err
 	}
 
+	excludeDirs, err := parseMultiStringArg(args, OPT_TERRAGRUNT_EXCLUDE_DIR, []string{})
+	if err != nil {
+		return nil, err
+	}
+
+	includeDirs, err := parseMultiStringArg(args, OPT_TERRAGRUNT_INCLUDE_DIR, []string{})
+	if err != nil {
+		return nil, err
+	}
+
 	opts, err := options.NewTerragruntOptions(filepath.ToSlash(terragruntConfigPath))
 	if err != nil {
 		return nil, err
@@ -82,9 +104,12 @@ func parseTerragruntOptionsFromArgs(args []string, writer, errWriter io.Writer) 
 
 	opts.TerraformPath = filepath.ToSlash(terraformPath)
 	opts.AutoInit = !parseBooleanArg(args, OPT_TERRAGRUNT_NO_AUTO_INIT, os.Getenv("TERRAGRUNT_AUTO_INIT") == "false")
+	opts.AutoRetry = !parseBooleanArg(args, OPT_TERRAGRUNT_NO_AUTO_RETRY, os.Getenv("TERRAGRUNT_AUTO_RETRY") == "false")
 	opts.NonInteractive = parseBooleanArg(args, OPT_NON_INTERACTIVE, os.Getenv("TF_INPUT") == "false" || os.Getenv("TF_INPUT") == "0")
 	opts.TerraformCliArgs = filterTerragruntArgs(args)
+	opts.TerraformCommand = util.FirstArg(opts.TerraformCliArgs)
 	opts.WorkingDir = filepath.ToSlash(workingDir)
+	opts.DownloadDir = filepath.ToSlash(downloadDir)
 	opts.Logger = util.CreateLoggerWithWriter(errWriter, "")
 	opts.RunTerragrunt = runTerragrunt
 	opts.Source = terraformSource
@@ -94,32 +119,69 @@ func parseTerragruntOptionsFromArgs(args []string, writer, errWriter io.Writer) 
 	opts.ErrWriter = errWriter
 	opts.Env = parseEnvironmentVariables(os.Environ())
 	opts.IamRole = iamRole
+	opts.ExcludeDirs = excludeDirs
+	opts.IncludeDirs = includeDirs
 
 	return opts, nil
 }
 
 func filterTerraformExtraArgs(terragruntOptions *options.TerragruntOptions, terragruntConfig *config.TerragruntConfig) []string {
 	out := []string{}
-	cmd := firstArg(terragruntOptions.TerraformCliArgs)
+	cmd := util.FirstArg(terragruntOptions.TerraformCliArgs)
 
 	for _, arg := range terragruntConfig.Terraform.ExtraArgs {
 		for _, arg_cmd := range arg.Commands {
 			if cmd == arg_cmd {
-				out = append(out, arg.Arguments...)
+				lastArg := util.LastArg(terragruntOptions.TerraformCliArgs)
+				skipVars := cmd == "apply" && util.IsFile(lastArg)
 
-				// If RequiredVarFiles is specified, add -var-file=<file> for each specified files
-				for _, file := range util.RemoveDuplicatesFromListKeepLast(arg.RequiredVarFiles) {
-					out = append(out, fmt.Sprintf("-var-file=%s", file))
+				// The following is a fix for GH-493.
+				// If the first argument is "apply" and the second argument is a file (plan),
+				// we don't add any -var-file to the command.
+				if skipVars {
+					// If we have to skip vars, we need to iterate over all elements of array...
+					for _, a := range arg.Arguments {
+						if !strings.HasPrefix(a, "-var") {
+							out = append(out, a)
+						}
+					}
+				} else {
+					// ... Otherwise, let's add all the arguments
+					out = append(out, arg.Arguments...)
 				}
 
-				// If OptionalVarFiles is specified, check for each file if it exists and if so, add -var-file=<file>
-				// It is possible that many files resolve to the same path, so we remove duplicates.
-				for _, file := range util.RemoveDuplicatesFromListKeepLast(arg.OptionalVarFiles) {
-					if util.FileExists(file) {
+				if !skipVars {
+					// If RequiredVarFiles is specified, add -var-file=<file> for each specified files
+					for _, file := range util.RemoveDuplicatesFromListKeepLast(arg.RequiredVarFiles) {
 						out = append(out, fmt.Sprintf("-var-file=%s", file))
-					} else {
-						terragruntOptions.Logger.Printf("Skipping var-file %s as it does not exist", file)
 					}
+
+					// If OptionalVarFiles is specified, check for each file if it exists and if so, add -var-file=<file>
+					// It is possible that many files resolve to the same path, so we remove duplicates.
+					for _, file := range util.RemoveDuplicatesFromListKeepLast(arg.OptionalVarFiles) {
+						if util.FileExists(file) {
+							out = append(out, fmt.Sprintf("-var-file=%s", file))
+						} else {
+							terragruntOptions.Logger.Printf("Skipping var-file %s as it does not exist", file)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return out
+}
+
+func filterTerraformEnvVarsFromExtraArgs(terragruntOptions *options.TerragruntOptions, terragruntConfig *config.TerragruntConfig) map[string]string {
+	out := map[string]string{}
+	cmd := util.FirstArg(terragruntOptions.TerraformCliArgs)
+
+	for _, arg := range terragruntConfig.Terraform.ExtraArgs {
+		for _, argcmd := range arg.Commands {
+			if cmd == argcmd {
+				for k, v := range arg.EnvVars {
+					out[k] = v
 				}
 			}
 		}
@@ -195,22 +257,25 @@ func parseStringArg(args []string, argName string, defaultValue string) (string,
 	return defaultValue, nil
 }
 
-// A convenience method that returns the first item (0th index) in the given list or an empty string if this is an
-// empty list
-func firstArg(args []string) string {
-	if len(args) > 0 {
-		return args[0]
-	}
-	return ""
-}
+// Find multiple string arguments of the same type (e.g. --foo "VALUE_A" --foo "VALUE_B") of the given name in the given list of arguments. If there are any present,
+// return a list of all values. If there are any present, but one of them has no value, return an error. If there aren't any present, return defaultValue.
+func parseMultiStringArg(args []string, argName string, defaultValue []string) ([]string, error) {
+	stringArgs := []string{}
 
-// A convenience method that returns the second item (1st index) in the given list or an empty string if this is a
-// list that has less than 2 items in it
-func secondArg(args []string) string {
-	if len(args) > 1 {
-		return args[1]
+	for i, arg := range args {
+		if arg == fmt.Sprintf("--%s", argName) {
+			if (i + 1) < len(args) {
+				stringArgs = append(stringArgs, args[i+1])
+			} else {
+				return nil, errors.WithStackTrace(ArgMissingValue(argName))
+			}
+		}
 	}
-	return ""
+	if len(stringArgs) == 0 {
+		return defaultValue, nil
+	}
+
+	return stringArgs, nil
 }
 
 // Custom error types

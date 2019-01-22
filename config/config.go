@@ -18,23 +18,27 @@ const OldTerragruntConfigPath = ".terragrunt"
 
 // TerragruntConfig represents a parsed and expanded configuration
 type TerragruntConfig struct {
-	Terraform    *TerraformConfig
-	RemoteState  *remote.RemoteState
-	Dependencies *ModuleDependencies
+	Terraform      *TerraformConfig
+	RemoteState    *remote.RemoteState
+	Dependencies   *ModuleDependencies
+	PreventDestroy bool
+	IamRole        string
 }
 
 func (conf *TerragruntConfig) String() string {
-	return fmt.Sprintf("TerragruntConfig{Terraform = %v, RemoteState = %v, Dependencies = %v}", conf.Terraform, conf.RemoteState, conf.Dependencies)
+	return fmt.Sprintf("TerragruntConfig{Terraform = %v, RemoteState = %v, Dependencies = %v, PreventDestroy = %v}", conf.Terraform, conf.RemoteState, conf.Dependencies, conf.PreventDestroy)
 }
 
 // terragruntConfigFile represents the configuration supported in a Terragrunt configuration file (i.e.
 // terraform.tfvars or .terragrunt)
 type terragruntConfigFile struct {
-	Terraform    *TerraformConfig    `hcl:"terraform,omitempty"`
-	Include      *IncludeConfig      `hcl:"include,omitempty"`
-	Lock         *LockConfig         `hcl:"lock,omitempty"`
-	RemoteState  *remote.RemoteState `hcl:"remote_state,omitempty"`
-	Dependencies *ModuleDependencies `hcl:"dependencies,omitempty"`
+	Terraform      *TerraformConfig    `hcl:"terraform,omitempty"`
+	Include        *IncludeConfig      `hcl:"include,omitempty"`
+	Lock           *LockConfig         `hcl:"lock,omitempty"`
+	RemoteState    *remote.RemoteState `hcl:"remote_state,omitempty"`
+	Dependencies   *ModuleDependencies `hcl:"dependencies,omitempty"`
+	PreventDestroy bool                `hcl:"prevent_destroy,omitempty"`
+	IamRole        string              `hcl:"iam_role"`
 }
 
 // Older versions of Terraform did not support locking, so Terragrunt offered locking as a feature. As of version 0.9.0,
@@ -117,15 +121,21 @@ func (conf *TerraformConfig) ValidateHooks() error {
 
 // TerraformExtraArguments sets a list of arguments to pass to Terraform if command fits any in the `Commands` list
 type TerraformExtraArguments struct {
-	Name             string   `hcl:",key"`
-	Arguments        []string `hcl:"arguments,omitempty"`
-	RequiredVarFiles []string `hcl:"required_var_files,omitempty"`
-	OptionalVarFiles []string `hcl:"optional_var_files,omitempty"`
-	Commands         []string `hcl:"commands,omitempty"`
+	Name             string            `hcl:",key"`
+	Arguments        []string          `hcl:"arguments,omitempty"`
+	RequiredVarFiles []string          `hcl:"required_var_files,omitempty"`
+	OptionalVarFiles []string          `hcl:"optional_var_files,omitempty"`
+	Commands         []string          `hcl:"commands,omitempty"`
+	EnvVars          map[string]string `hcl:"env_vars,omitempty"`
 }
 
 func (conf *TerraformExtraArguments) String() string {
-	return fmt.Sprintf("TerraformArguments{Name = %s, Arguments = %v, Commands = %v}", conf.Name, conf.Arguments, conf.Commands)
+	return fmt.Sprintf(
+		"TerraformArguments{Name = %s, Arguments = %v, Commands = %v, EnvVars = %v}",
+		conf.Name,
+		conf.Arguments,
+		conf.Commands,
+		conf.EnvVars)
 }
 
 // Return the default path to use for the Terragrunt configuration file. The reason this is a method rather than a
@@ -142,7 +152,7 @@ func DefaultConfigPath(workingDir string) string {
 // Returns a list of all Terragrunt config files in the given path or any subfolder of the path. A file is a Terragrunt
 // config file if it has a name as returned by the DefaultConfigPath method and contains Terragrunt config contents
 // as returned by the IsTerragruntConfigFile method.
-func FindConfigFilesInPath(rootPath string) ([]string, error) {
+func FindConfigFilesInPath(rootPath string, terragruntOptions *options.TerragruntOptions) ([]string, error) {
 	configFiles := []string{}
 
 	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
@@ -150,21 +160,50 @@ func FindConfigFilesInPath(rootPath string) ([]string, error) {
 			return err
 		}
 
-		if info.IsDir() {
-			configPath := DefaultConfigPath(path)
-			isTerragruntConfig, err := IsTerragruntConfigFile(configPath)
-			if err != nil {
-				return err
-			}
-			if isTerragruntConfig {
-				configFiles = append(configFiles, configPath)
-			}
+		isTerragruntModule, err := containsTerragruntModule(path, info, terragruntOptions)
+		if err != nil {
+			return err
+		}
+
+		if isTerragruntModule {
+			configFiles = append(configFiles, DefaultConfigPath(path))
 		}
 
 		return nil
 	})
 
 	return configFiles, err
+}
+
+// Returns true if the given path with the given FileInfo contains a Terragrunt module and false otherwise. A path
+// contains a Terragrunt module if it contains a Terragrunt configuration file (terraform.tfvars) and is not a cache
+// or download dir.
+func containsTerragruntModule(path string, info os.FileInfo, terragruntOptions *options.TerragruntOptions) (bool, error) {
+	if !info.IsDir() {
+		return false, nil
+	}
+
+	// Skip the Terragrunt cache dir
+	if strings.Contains(path, options.TerragruntCacheDir) {
+		return false, nil
+	}
+
+	canonicalPath, err := util.CanonicalPath(path, "")
+	if err != nil {
+		return false, err
+	}
+
+	canonicalDownloadPath, err := util.CanonicalPath(terragruntOptions.DownloadDir, "")
+	if err != nil {
+		return false, err
+	}
+
+	// Skip any custom download dir specified by the user
+	if strings.Contains(canonicalPath, canonicalDownloadPath) {
+		return false, err
+	}
+
+	return IsTerragruntConfigFile(DefaultConfigPath(path))
 }
 
 // Returns true if the given path corresponds to file that could be a Terragrunt config file. A file could be a
@@ -305,6 +344,9 @@ func mergeConfigWithIncludedConfig(config *TerragruntConfig, includedConfig *Ter
 	if config.RemoteState != nil {
 		includedConfig.RemoteState = config.RemoteState
 	}
+	if config.PreventDestroy {
+		includedConfig.PreventDestroy = config.PreventDestroy
+	}
 
 	if config.Terraform != nil {
 		if includedConfig.Terraform == nil {
@@ -314,6 +356,9 @@ func mergeConfigWithIncludedConfig(config *TerragruntConfig, includedConfig *Ter
 				includedConfig.Terraform.Source = config.Terraform.Source
 			}
 			mergeExtraArgs(terragruntOptions, config.Terraform.ExtraArgs, &includedConfig.Terraform.ExtraArgs)
+
+			mergeHooks(terragruntOptions, config.Terraform.BeforeHooks, &includedConfig.Terraform.BeforeHooks)
+			mergeHooks(terragruntOptions, config.Terraform.AfterHooks, &includedConfig.Terraform.AfterHooks)
 		}
 	}
 
@@ -321,7 +366,47 @@ func mergeConfigWithIncludedConfig(config *TerragruntConfig, includedConfig *Ter
 		includedConfig.Dependencies = config.Dependencies
 	}
 
+	if config.IamRole != "" {
+		includedConfig.IamRole = config.IamRole
+	}
+
 	return includedConfig, nil
+}
+
+// Merge the hooks (before_hook and after_hook).
+//
+// If a child's hook (before_hook or after_hook) has the same name a parent's hook,
+// then the child's hook will be selected (and the parent's ignored)
+// If a child's hook has a different name from all of the parent's hooks,
+// then the child's hook will be added to the end of the parent's.
+// Therefore, the child with the same name overrides the parent
+func mergeHooks(terragruntOptions *options.TerragruntOptions, childHooks []Hook, parentHooks *[]Hook) {
+	result := *parentHooks
+	for _, child := range childHooks {
+		parentHookWithSameName := getIndexOfHookWithName(result, child.Name)
+		if parentHookWithSameName != -1 {
+			// If the parent contains a hook with the same name as the child,
+			// then override the parent's hook with the child's.
+			terragruntOptions.Logger.Printf("hook '%v' from child overriding parent", child.Name)
+			result[parentHookWithSameName] = child
+		} else {
+			// If the parent does not contain a hook with the same name as the child
+			// then add the child to the end.
+			result = append(result, child)
+		}
+	}
+	*parentHooks = result
+}
+
+// Returns the index of the Hook with the given name,
+// or -1 if no Hook have the given name.
+func getIndexOfHookWithName(hooks []Hook, name string) int {
+	for i, hook := range hooks {
+		if hook.Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // Merge the extra arguments.
@@ -408,6 +493,8 @@ func convertToTerragruntConfig(terragruntConfigFromFile *terragruntConfigFile, t
 
 	terragruntConfig.Terraform = terragruntConfigFromFile.Terraform
 	terragruntConfig.Dependencies = terragruntConfigFromFile.Dependencies
+	terragruntConfig.PreventDestroy = terragruntConfigFromFile.PreventDestroy
+	terragruntConfig.IamRole = terragruntConfigFromFile.IamRole
 
 	return terragruntConfig, nil
 }

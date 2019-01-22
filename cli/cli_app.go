@@ -3,10 +3,10 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strings"
-
-	"os"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/gruntwork-io/terragrunt/aws_helper"
@@ -17,22 +17,27 @@ import (
 	"github.com/gruntwork-io/terragrunt/remote"
 	"github.com/gruntwork-io/terragrunt/shell"
 	"github.com/gruntwork-io/terragrunt/util"
-	version "github.com/hashicorp/go-version"
+	"github.com/hashicorp/go-version"
+	"github.com/mattn/go-zglob"
 	"github.com/urfave/cli"
 )
 
 const OPT_TERRAGRUNT_CONFIG = "terragrunt-config"
 const OPT_TERRAGRUNT_TFPATH = "terragrunt-tfpath"
 const OPT_TERRAGRUNT_NO_AUTO_INIT = "terragrunt-no-auto-init"
+const OPT_TERRAGRUNT_NO_AUTO_RETRY = "terragrunt-no-auto-retry"
 const OPT_NON_INTERACTIVE = "terragrunt-non-interactive"
 const OPT_WORKING_DIR = "terragrunt-working-dir"
+const OPT_DOWNLOAD_DIR = "terragrunt-download-dir"
 const OPT_TERRAGRUNT_SOURCE = "terragrunt-source"
 const OPT_TERRAGRUNT_SOURCE_UPDATE = "terragrunt-source-update"
 const OPT_TERRAGRUNT_IAM_ROLE = "terragrunt-iam-role"
 const OPT_TERRAGRUNT_IGNORE_DEPENDENCY_ERRORS = "terragrunt-ignore-dependency-errors"
+const OPT_TERRAGRUNT_EXCLUDE_DIR = "terragrunt-exclude-dir"
+const OPT_TERRAGRUNT_INCLUDE_DIR = "terragrunt-include-dir"
 
-var ALL_TERRAGRUNT_BOOLEAN_OPTS = []string{OPT_NON_INTERACTIVE, OPT_TERRAGRUNT_SOURCE_UPDATE, OPT_TERRAGRUNT_IGNORE_DEPENDENCY_ERRORS, OPT_TERRAGRUNT_NO_AUTO_INIT}
-var ALL_TERRAGRUNT_STRING_OPTS = []string{OPT_TERRAGRUNT_CONFIG, OPT_TERRAGRUNT_TFPATH, OPT_WORKING_DIR, OPT_TERRAGRUNT_SOURCE, OPT_TERRAGRUNT_IAM_ROLE}
+var ALL_TERRAGRUNT_BOOLEAN_OPTS = []string{OPT_NON_INTERACTIVE, OPT_TERRAGRUNT_SOURCE_UPDATE, OPT_TERRAGRUNT_IGNORE_DEPENDENCY_ERRORS, OPT_TERRAGRUNT_NO_AUTO_INIT, OPT_TERRAGRUNT_NO_AUTO_RETRY}
+var ALL_TERRAGRUNT_STRING_OPTS = []string{OPT_TERRAGRUNT_CONFIG, OPT_TERRAGRUNT_TFPATH, OPT_WORKING_DIR, OPT_DOWNLOAD_DIR, OPT_TERRAGRUNT_SOURCE, OPT_TERRAGRUNT_IAM_ROLE, OPT_TERRAGRUNT_EXCLUDE_DIR, OPT_TERRAGRUNT_INCLUDE_DIR}
 
 const CMD_PLAN_ALL = "plan-all"
 const CMD_APPLY_ALL = "apply-all"
@@ -41,6 +46,7 @@ const CMD_OUTPUT_ALL = "output-all"
 const CMD_VALIDATE_ALL = "validate-all"
 
 const CMD_INIT = "init"
+const CMD_INIT_FROM_MODULE = "init-from-module"
 
 // CMD_SPIN_UP is deprecated.
 const CMD_SPIN_UP = "spin-up"
@@ -104,12 +110,16 @@ GLOBAL OPTIONS:
    terragrunt-config                    Path to the Terragrunt config file. Default is terraform.tfvars.
    terragrunt-tfpath                    Path to the Terraform binary. Default is terraform (on PATH).
    terragrunt-no-auto-init              Don't automatically run 'terraform init' during other terragrunt commands. You must run 'terragrunt init' manually.
+   terragrunt-no-auto-retry             Don't automatically re-run command in case of transient errors.
    terragrunt-non-interactive           Assume "yes" for all prompts.
    terragrunt-working-dir               The path to the Terraform templates. Default is current directory.
+   terragrunt-download-dir              The path where to download Terraform code. Default is .terragrunt-cache in the working directory.
    terragrunt-source                    Download Terraform configurations from the specified source into a temporary folder, and run Terraform in that temporary folder.
    terragrunt-source-update             Delete the contents of the temporary folder to clear out any old, cached source code before downloading new source code into it.
    terragrunt-iam-role             		Assume the specified IAM role before executing Terraform. Can also be set via the TERRAGRUNT_IAM_ROLE environment variable.
    terragrunt-ignore-dependency-errors  *-all commands continue processing components even if a dependency fails.
+   terragrunt-exclude-dir               Unix-style glob of directories to exclude when running *-all commands
+   terragrunt-include-dir               Unix-style glob of directories to include when running *-all commands
 
 VERSION:
    {{.Version}}{{if len .Authors}}
@@ -125,6 +135,13 @@ var MODULE_REGEX = regexp.MustCompile(`module[[:blank:]]+".+"`)
 const DEFAULT_TERRAFORM_VERSION_CONSTRAINT = ">= v0.9.3"
 
 const TERRAFORM_EXTENSION_GLOB = "*.tf"
+
+// The supported flags to show help of terraform commands
+var TERRAFORM_HELP_FLAGS = []string{
+	"--help",
+	"-help",
+	"-h",
+}
 
 // Create the Terragrunt CLI App
 func CreateTerragruntCli(version string, writer io.Writer, errwriter io.Writer) *cli.App {
@@ -200,9 +217,17 @@ func runCommand(command string, terragruntOptions *options.TerragruntOptions) (f
 // Downloads terraform source if necessary, then runs terraform with the given options and CLI args.
 // This will forward all the args and extra_arguments directly to Terraform.
 func runTerragrunt(terragruntOptions *options.TerragruntOptions) error {
+	if shouldPrintTerraformHelp(terragruntOptions) {
+		return shell.RunTerraformCommand(terragruntOptions, terragruntOptions.TerraformCliArgs...)
+	}
+
 	terragruntConfig, err := config.ReadTerragruntConfig(terragruntOptions)
 	if err != nil {
 		return err
+	}
+
+	if terragruntOptions.IamRole == "" {
+		terragruntOptions.IamRole = terragruntConfig.IamRole
 	}
 
 	if err := assumeRoleIfNecessary(terragruntOptions); err != nil {
@@ -215,6 +240,10 @@ func runTerragrunt(terragruntOptions *options.TerragruntOptions) error {
 		}
 	}
 
+	if err := checkFolderContainsTerraformCode(terragruntOptions); err != nil {
+		return err
+	}
+
 	if terragruntConfig.RemoteState != nil {
 		if err := checkTerraformCodeDefinesBackend(terragruntOptions, terragruntConfig.RemoteState.Backend); err != nil {
 			return err
@@ -222,6 +251,15 @@ func runTerragrunt(terragruntOptions *options.TerragruntOptions) error {
 	}
 
 	return runTerragruntWithConfig(terragruntOptions, terragruntConfig, false)
+}
+
+func shouldPrintTerraformHelp(terragruntOptions *options.TerragruntOptions) bool {
+	for _, tfHelpFlag := range TERRAFORM_HELP_FLAGS {
+		if util.ListContainsElement(terragruntOptions.TerraformCliArgs, tfHelpFlag) {
+			return true
+		}
+	}
+	return false
 }
 
 func processHooks(hooks []config.Hook, terragruntOptions *options.TerragruntOptions, previousExecError ...error) error {
@@ -254,7 +292,7 @@ func processHooks(hooks []config.Hook, terragruntOptions *options.TerragruntOpti
 
 func shouldRunHook(hook config.Hook, terragruntOptions *options.TerragruntOptions, previousExecErrors ...error) bool {
 	//if there's no previous error, execute command
-	//OR if a previos error DID happen AND we want to run anyways
+	//OR if a previous error DID happen AND we want to run anyways
 	//then execute.
 	//Skip execution if there was an error AND we care about errors
 
@@ -263,7 +301,7 @@ func shouldRunHook(hook config.Hook, terragruntOptions *options.TerragruntOption
 	//for the len(previousExecErrors) == 0 check that used to be here
 	multiError := errors.NewMultiError(previousExecErrors...)
 
-	return util.ListContainsElement(hook.Commands, terragruntOptions.TerraformCliArgs[0]) && (multiError == nil || hook.RunOnError)
+	return util.ListContainsElement(hook.Commands, terragruntOptions.TerraformCommand) && (multiError == nil || hook.RunOnError)
 }
 
 // Assume an IAM role, if one is specified, by making API calls to Amazon STS and setting the environment variables
@@ -293,9 +331,12 @@ func runTerragruntWithConfig(terragruntOptions *options.TerragruntOptions, terra
 	// Add extra_arguments to the command
 	if terragruntConfig.Terraform != nil && terragruntConfig.Terraform.ExtraArgs != nil && len(terragruntConfig.Terraform.ExtraArgs) > 0 {
 		terragruntOptions.InsertTerraformCliArgs(filterTerraformExtraArgs(terragruntOptions, terragruntConfig)...)
+		for k, v := range filterTerraformEnvVarsFromExtraArgs(terragruntOptions, terragruntConfig) {
+			terragruntOptions.Env[k] = v
+		}
 	}
 
-	if firstArg(terragruntOptions.TerraformCliArgs) == CMD_INIT {
+	if util.FirstArg(terragruntOptions.TerraformCliArgs) == CMD_INIT {
 		if err := prepareInitCommand(terragruntOptions, terragruntConfig, allowSourceDownload); err != nil {
 			return err
 		}
@@ -305,6 +346,10 @@ func runTerragruntWithConfig(terragruntOptions *options.TerragruntOptions, terra
 		}
 	}
 
+	if err := checkProtectedModule(terragruntOptions, terragruntConfig); err != nil {
+		return err
+	}
+
 	beforeHookErrors := processHooks(terragruntConfig.Terraform.GetBeforeHooks(), terragruntOptions)
 	terraformError := runTerraformCommandIfNoErrors(beforeHookErrors, terragruntOptions)
 	postHookErrors := processHooks(terragruntConfig.Terraform.GetAfterHooks(), terragruntOptions, beforeHookErrors, terraformError)
@@ -312,13 +357,51 @@ func runTerragruntWithConfig(terragruntOptions *options.TerragruntOptions, terra
 	return errors.NewMultiError(beforeHookErrors, terraformError, postHookErrors)
 }
 
+var moduleNotFoundErr = regexp.MustCompile(`Error loading modules: module .+?: not found, may need to run 'terraform init'`)
+
 func runTerraformCommandIfNoErrors(possibleErrors error, terragruntOptions *options.TerragruntOptions) error {
-	if possibleErrors == nil {
-		return shell.RunTerraformCommand(terragruntOptions, terragruntOptions.TerraformCliArgs...)
+	if possibleErrors != nil {
+		terragruntOptions.Logger.Println("Errors encountered running before_hooks. Not running terraform.")
+		return nil
 	}
 
-	terragruntOptions.Logger.Println("Errors encountered running before_hooks. Not running terraform.")
-	return nil
+	// Workaround for https://github.com/hashicorp/terraform/issues/18460. Calling 'terraform init -get=false '
+	// sometimes results in Terraform trying to download/validate modules anyway, so we need to ignore that error.
+	if terragruntOptions.TerraformCommand == CMD_INIT_FROM_MODULE {
+		// Redirect all log output to stderr to make sure we don't pollute stdout with this extra call to 'init'
+		terragruntOptionsCopy := terragruntOptions.Clone(terragruntOptions.TerragruntConfigPath)
+		terragruntOptionsCopy.Writer = terragruntOptionsCopy.ErrWriter
+
+		out, err := shell.RunTerraformCommandWithOutput(terragruntOptionsCopy, terragruntOptionsCopy.TerraformCliArgs...)
+
+		// If we got an error and the error output included this error message, ignore the error and keep going
+		if err != nil && (len(moduleNotFoundErr.FindStringSubmatch(out.Stderr)) > 0 || strings.Contains(out.Stderr, "Missing required providers.")) {
+			terragruntOptions.Logger.Println("Ignoring error from call to init, as this is a known Terraform bug: https://github.com/hashicorp/terraform/issues/18460")
+			return nil
+		}
+
+		return err
+	}
+
+	return runTerraformWithRetry(terragruntOptions)
+}
+
+func runTerraformWithRetry(terragruntOptions *options.TerragruntOptions) error {
+	// Retry the command configurable time with sleep in between
+	for i := 0; i < terragruntOptions.MaxRetryAttempts; i++ {
+		if out, tferr := shell.RunTerraformCommandWithOutput(terragruntOptions, terragruntOptions.TerraformCliArgs...); tferr != nil {
+			if isRetryable(out.Stderr, tferr, terragruntOptions) {
+				terragruntOptions.Logger.Printf("Encountered an error eligible for retrying. Sleeping %v before retrying.\n", terragruntOptions.Sleep)
+				time.Sleep(terragruntOptions.Sleep)
+			} else {
+				return tferr
+			}
+		} else {
+			return nil
+		}
+	}
+
+	return errors.WithStackTrace(MaxRetriesExceeded{terragruntOptions})
 }
 
 // Prepare for running 'terraform init' by
@@ -350,6 +433,19 @@ func prepareInitCommand(terragruntOptions *options.TerragruntOptions, terragrunt
 		// Add backend config arguments to the command
 		terragruntOptions.InsertTerraformCliArgs(terragruntConfig.RemoteState.ToTerraformInitArgs()...)
 	}
+	return nil
+}
+
+func checkFolderContainsTerraformCode(terragruntOptions *options.TerragruntOptions) error {
+	files, err := zglob.Glob(fmt.Sprintf("%s/**/*.tf", terragruntOptions.WorkingDir))
+	if err != nil {
+		return errors.WithStackTrace(err)
+	}
+
+	if len(files) == 0 {
+		return errors.WithStackTrace(NoTerraformFilesFound(terragruntOptions.WorkingDir))
+	}
+
 	return nil
 }
 
@@ -402,7 +498,7 @@ func prepareNonInitCommand(terragruntOptions *options.TerragruntOptions, terragr
 
 // Determines if 'terraform init' needs to be executed
 func needsInit(terragruntOptions *options.TerragruntOptions, terragruntConfig *config.TerragruntConfig) (bool, error) {
-	if util.ListContainsElement(TERRAFORM_COMMANDS_THAT_DO_NOT_NEED_INIT, firstArg(terragruntOptions.TerraformCliArgs)) {
+	if util.ListContainsElement(TERRAFORM_COMMANDS_THAT_DO_NOT_NEED_INIT, util.FirstArg(terragruntOptions.TerraformCliArgs)) {
 		return false, nil
 	}
 
@@ -429,7 +525,7 @@ func providersNeedInit(terragruntOptions *options.TerragruntOptions) bool {
 
 // Runs the terraform init command to perform what is referred to as Auto-Init in the README.md.
 // This is intended to be run when the user runs another terragrunt command (e.g. 'terragrunt apply'),
-// but terragrunt determines that 'terraform init' needs to be called pror to runing
+// but terragrunt determines that 'terraform init' needs to be called prior to running
 // the respective terraform command (e.g. 'terraform apply')
 //
 // The terragruntOptions are assumed to be the options for running the original terragrunt command.
@@ -440,14 +536,25 @@ func providersNeedInit(terragruntOptions *options.TerragruntOptions) bool {
 func runTerraformInit(terragruntOptions *options.TerragruntOptions, terragruntConfig *config.TerragruntConfig, terraformSource *TerraformSource) error {
 
 	// Prevent Auto-Init if the user has disabled it
-	if firstArg(terragruntOptions.TerraformCliArgs) != CMD_INIT && !terragruntOptions.AutoInit {
+	if util.FirstArg(terragruntOptions.TerraformCliArgs) != CMD_INIT && !terragruntOptions.AutoInit {
 		return errors.WithStackTrace(InitNeededButDisabled("Cannot continue because init is needed, but Auto-Init is disabled.  You must run 'terragrunt init' manually."))
 	}
 
+	initOptions, err := prepareInitOptions(terragruntOptions, terraformSource)
+
+	if err != nil {
+		return err
+	}
+
+	return runTerragruntWithConfig(initOptions, terragruntConfig, terraformSource != nil)
+}
+
+func prepareInitOptions(terragruntOptions *options.TerragruntOptions, terraformSource *TerraformSource) (*options.TerragruntOptions, error) {
 	// Need to clone the terragruntOptions, so the TerraformCliArgs can be configured to run the init command
 	initOptions := terragruntOptions.Clone(terragruntOptions.TerragruntConfigPath)
 	initOptions.TerraformCliArgs = []string{CMD_INIT}
 	initOptions.WorkingDir = terragruntOptions.WorkingDir
+	initOptions.TerraformCommand = CMD_INIT
 
 	// Don't pollute stdout with the stdout from Aoto Init
 	initOptions.Writer = initOptions.ErrWriter
@@ -457,27 +564,35 @@ func runTerraformInit(terragruntOptions *options.TerragruntOptions, terragruntCo
 	if downloadSource {
 		initOptions.WorkingDir = terraformSource.WorkingDir
 		if !util.FileExists(terraformSource.WorkingDir) {
-			if err := os.MkdirAll(terraformSource.WorkingDir, 0777); err != nil {
-				return errors.WithStackTrace(err)
+			if err := os.MkdirAll(terraformSource.WorkingDir, 0700); err != nil {
+				return nil, errors.WithStackTrace(err)
 			}
 		}
 
+		// We will run init separately to download modules, plugins, backend state, etc, so don't run it at this point
+		initOptions.AppendTerraformCliArgs("-get=false")
+		initOptions.AppendTerraformCliArgs("-get-plugins=false")
+		initOptions.AppendTerraformCliArgs("-backend=false")
+
+		// Set the TerraformCommand attribute to match hooks on `init-from-module`
+		initOptions.TerraformCommand = CMD_INIT_FROM_MODULE
+
 		v0_10_0, err := version.NewVersion("v0.10.0")
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		if terragruntOptions.TerraformVersion.LessThan(v0_10_0) {
 			// Terraform versions < 0.10.0 specified the module source as an argument (rather than the -from-module option)
-			initOptions.AppendTerraformCliArgs(terraformSource.CanonicalSourceURL.String())
+			initOptions.AppendTerraformCliArgs(terraformSource.CanonicalSourceURL.String(), "-no-color")
 		} else {
 			// Terraform versions >= 0.10.0 specify the module source using the -from-module option
-			initOptions.AppendTerraformCliArgs("-from-module=" + terraformSource.CanonicalSourceURL.String())
+			initOptions.AppendTerraformCliArgs("-from-module="+terraformSource.CanonicalSourceURL.String(), "-no-color")
 		}
+
 		initOptions.AppendTerraformCliArgs(terraformSource.DownloadDir)
 	}
-
-	return runTerragruntWithConfig(initOptions, terragruntConfig, downloadSource)
+	return initOptions, nil
 }
 
 // Returns an error if allowSourceDownload is false, and terragruntOptions.TerraformCliArgs contains source download related arguments
@@ -547,7 +662,7 @@ func remoteStateNeedsInit(remoteState *remote.RemoteState, terragruntOptions *op
 
 	// We only configure remote state for the commands that use the tfstate files. We do not configure it for
 	// commands such as "get" or "version".
-	if remoteState != nil && util.ListContainsElement(TERRAFORM_COMMANDS_THAT_USE_STATE, firstArg(terragruntOptions.TerraformCliArgs)) {
+	if remoteState != nil && util.ListContainsElement(TERRAFORM_COMMANDS_THAT_USE_STATE, util.FirstArg(terragruntOptions.TerraformCliArgs)) {
 		return remoteState.NeedsInit(terragruntOptions)
 	}
 	return false, nil
@@ -630,6 +745,25 @@ func validateAll(terragruntOptions *options.TerragruntOptions) error {
 	return stack.Validate(terragruntOptions)
 }
 
+// checkProtectedModule checks if module is protected via the "prevent_destroy" flag
+func checkProtectedModule(terragruntOptions *options.TerragruntOptions, terragruntConfig *config.TerragruntConfig) error {
+	if util.FirstArg(terragruntOptions.TerraformCliArgs) != "destroy" {
+		return nil
+	}
+	if terragruntConfig.PreventDestroy {
+		return errors.WithStackTrace(ModuleIsProtected{Opts: terragruntOptions})
+	}
+	return nil
+}
+
+// isRetryable checks whether there was an error and we should attempt again
+func isRetryable(tfoutput string, tferr error, terragruntOptions *options.TerragruntOptions) bool {
+	if !terragruntOptions.AutoRetry || tferr == nil {
+		return false
+	}
+	return util.MatchesAny(terragruntOptions.RetryableErrors, tfoutput)
+}
+
 // Custom error types
 
 type UnrecognizedCommand string
@@ -660,4 +794,26 @@ type BackendNotDefined struct {
 
 func (err BackendNotDefined) Error() string {
 	return fmt.Sprintf("Found remote_state settings in %s but no backend block in the Terraform code in %s. You must define a backend block (it can be empty!) in your Terraform code or your remote state settings will have no effect! It should look something like this:\n\nterraform {\n  backend \"%s\" {}\n}\n\n", err.Opts.TerragruntConfigPath, err.Opts.WorkingDir, err.BackendType)
+}
+
+type NoTerraformFilesFound string
+
+func (path NoTerraformFilesFound) Error() string {
+	return fmt.Sprintf("Did not find any Terraform files (*.tf) in %s", string(path))
+}
+
+type ModuleIsProtected struct {
+	Opts *options.TerragruntOptions
+}
+
+func (err ModuleIsProtected) Error() string {
+	return fmt.Sprintf("Module is protected by the prevent_destroy flag in %s. Set it to false or delete it to allow destroying of the module.", err.Opts.TerragruntConfigPath)
+}
+
+type MaxRetriesExceeded struct {
+	Opts *options.TerragruntOptions
+}
+
+func (err MaxRetriesExceeded) Error() string {
+	return fmt.Sprintf("Exhausted retries (%v) for command %v %v", err.Opts.MaxRetryAttempts, err.Opts.TerraformPath, strings.Join(err.Opts.TerraformCliArgs, " "))
 }
